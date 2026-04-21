@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+
+    <!-- Input files -->
+    <input>
+        <net-file    value="intersection.net.xml"/>
+        <route-files value="routes.rou.xml"/>
+    </input>
+
+    <!-- Simulation time: 3600 s at 1 s steps -->
+    <time>
+        <begin      value="0"/>
+        <end        value="3600"/>
+        <step-length value="1.0"/>
+    </time>
+
+    <!-- Output to data/ directory -->
+    <output>
+        <summary-output  value="../data/summary.xml"/>
+        <tripinfo-output value="../data/tripinfo.xml"/>
+        <queue-output    value="../data/queue.xml"/>
+        <edgedata-output value="../data/edgedata.xml"/>
+    </output>
+
+    <!-- Processing -->
+    <processing>
+        <ignore-route-errors  value="true"/>
+        <collision.action     value="warn"/>
+        <time-to-teleport     value="300"/>
+    </processing>
+
+    <!-- Routing -->
+    <routing>
+        <device.rerouting.adaptation-steps    value="18"/>
+        <device.rerouting.adaptation-interval value="10"/>
+    </routing>
+
+    <!-- GUI (ignored by headless sumo) -->
+    <gui_only>
+        <start value="true"/>
+        <delay value="30"/>
+    </gui_only>
+
+    <!-- Reporting -->
+    <report>
+        <verbose     value="true"/>
+        <no-step-log value="true"/>
+    </report>
+
+</configuration>

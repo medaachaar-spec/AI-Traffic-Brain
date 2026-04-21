@@ -1,0 +1,50 @@
+# ── Simulation output ─────────────────────────────────────────────────────────
+data/*.csv
+data/*.pkl
+data/*.bak
+data/*.tmp
+data/*.xml
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# ── Streamlit ─────────────────────────────────────────────────────────────────
+.streamlit/
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+
+# ── OS artefacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+# Ignore heavy / useless files
+oracleJdk-26/
+data/
+__pycache__/
+.claude/
+
+# Python
+*.pyc
+
+# RL files
+*.pkl
+*.csv
+*.bak
+*.tmp
+.agents/
+skills-lock.json
+0.05
+0.66
+python

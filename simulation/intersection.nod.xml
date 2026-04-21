@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nodes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/nodes_file.xsd">
+
+    <!-- 3-intersection linear urban boulevard (east-west axis)
+         int_A (west) .. 400m .. int_B (centre) .. 400m .. int_C (east)
+         Each intersection has a north and south approach node 200m away. -->
+
+    <!-- Main boulevard intersections (traffic lights) -->
+    <node id="int_A" x="0"   y="0"    type="traffic_light"/>
+    <node id="int_B" x="400" y="0"    type="traffic_light"/>
+    <node id="int_C" x="800" y="0"    type="traffic_light"/>
+
+    <!-- North approach stubs -->
+    <node id="north_A" x="0"   y="200"  type="priority"/>
+    <node id="north_B" x="400" y="200"  type="priority"/>
+    <node id="north_C" x="800" y="200"  type="priority"/>
+
+    <!-- South approach stubs -->
+    <node id="south_A" x="0"   y="-200" type="priority"/>
+    <node id="south_B" x="400" y="-200" type="priority"/>
+    <node id="south_C" x="800" y="-200" type="priority"/>
+
+</nodes>

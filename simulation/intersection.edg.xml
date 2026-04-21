@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edges xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/edges_file.xsd">
+
+    <!-- Main boulevard (east-west): 3 lanes each direction, 13.9 m/s -->
+    <edge id="AB_east" from="int_A" to="int_B" numLanes="3" speed="13.9"/>
+    <edge id="AB_west" from="int_B" to="int_A" numLanes="3" speed="13.9"/>
+    <edge id="BC_east" from="int_B" to="int_C" numLanes="3" speed="13.9"/>
+    <edge id="BC_west" from="int_C" to="int_B" numLanes="3" speed="13.9"/>
+
+    <!-- North/South approach roads: 2 lanes each direction, 13.9 m/s -->
+
+    <!-- Intersection A approaches -->
+    <edge id="nA_in"  from="north_A" to="int_A"   numLanes="2" speed="13.9"/>
+    <edge id="nA_out" from="int_A"   to="north_A"  numLanes="2" speed="13.9"/>
+    <edge id="sA_in"  from="south_A" to="int_A"   numLanes="2" speed="13.9"/>
+    <edge id="sA_out" from="int_A"   to="south_A"  numLanes="2" speed="13.9"/>
+
+    <!-- Intersection B approaches -->
+    <edge id="nB_in"  from="north_B" to="int_B"   numLanes="2" speed="13.9"/>
+    <edge id="nB_out" from="int_B"   to="north_B"  numLanes="2" speed="13.9"/>
+    <edge id="sB_in"  from="south_B" to="int_B"   numLanes="2" speed="13.9"/>
+    <edge id="sB_out" from="int_B"   to="south_B"  numLanes="2" speed="13.9"/>
+
+    <!-- Intersection C approaches -->
+    <edge id="nC_in"  from="north_C" to="int_C"   numLanes="2" speed="13.9"/>
+    <edge id="nC_out" from="int_C"   to="north_C"  numLanes="2" speed="13.9"/>
+    <edge id="sC_in"  from="south_C" to="int_C"   numLanes="2" speed="13.9"/>
+    <edge id="sC_out" from="int_C"   to="south_C"  numLanes="2" speed="13.9"/>
+
+</edges>

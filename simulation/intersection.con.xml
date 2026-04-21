@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<connections xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/connections_file.xsd">
+
+    <!-- Lane conventions:
+           Boulevard (3 lanes): 0=right/kerb  1=middle  2=left/centre
+           Side roads (2 lanes): 0=right/kerb  1=left
+         Turn conventions (right-hand traffic):
+           Eastbound  right=south, left=north
+           Westbound  right=north, left=south
+           Southbound right=west,  left=east
+           Northbound right=east,  left=west -->
+
+    <!-- INTERSECTION A: western terminus T-junction
+         Incoming: AB_west(3), nA_in(2), sA_in(2)
+         Outgoing: AB_east(3), nA_out(2), sA_out(2) -->
+
+    <!-- AB_west (westbound) to nA_out: right turn north -->
+    <connection from="AB_west" to="nA_out" fromLane="0" toLane="0"/>
+    <connection from="AB_west" to="nA_out" fromLane="1" toLane="1"/>
+    <!-- AB_west (westbound) to sA_out: left turn south -->
+    <connection from="AB_west" to="sA_out" fromLane="1" toLane="0"/>
+    <connection from="AB_west" to="sA_out" fromLane="2" toLane="1"/>
+
+    <!-- nA_in (southbound) to sA_out: straight -->
+    <connection from="nA_in" to="sA_out" fromLane="0" toLane="0"/>
+    <connection from="nA_in" to="sA_out" fromLane="1" toLane="1"/>
+    <!-- nA_in (southbound) to AB_east: left turn east -->
+    <connection from="nA_in" to="AB_east" fromLane="1" toLane="1"/>
+    <connection from="nA_in" to="AB_east" fromLane="1" toLane="2"/>
+
+    <!-- sA_in (northbound) to nA_out: straight -->
+    <connection from="sA_in" to="nA_out" fromLane="0" toLane="0"/>
+    <connection from="sA_in" to="nA_out" fromLane="1" toLane="1"/>
+    <!-- sA_in (northbound) to AB_east: right turn east -->
+    <connection from="sA_in" to="AB_east" fromLane="0" toLane="0"/>
+    <connection from="sA_in" to="AB_east" fromLane="0" toLane="1"/>
+
+    <!-- INTERSECTION B: centre full 4-way crossroads
+         Incoming: AB_east(3), BC_west(3), nB_in(2), sB_in(2)
+         Outgoing: BC_east(3), AB_west(3), nB_out(2), sB_out(2) -->
+
+    <!-- AB_east (eastbound) to BC_east: straight through -->
+    <connection from="AB_east" to="BC_east" fromLane="0" toLane="0"/>
+    <connection from="AB_east" to="BC_east" fromLane="1" toLane="1"/>
+    <connection from="AB_east" to="BC_east" fromLane="2" toLane="2"/>
+    <!-- AB_east (eastbound) to sB_out: right turn south -->
+    <connection from="AB_east" to="sB_out" fromLane="0" toLane="0"/>
+    <connection from="AB_east" to="sB_out" fromLane="0" toLane="1"/>
+    <!-- AB_east (eastbound) to nB_out: left turn north -->
+    <connection from="AB_east" to="nB_out" fromLane="2" toLane="0"/>
+    <connection from="AB_east" to="nB_out" fromLane="2" toLane="1"/>
+
+    <!-- BC_west (westbound) to AB_west: straight through -->
+    <connection from="BC_west" to="AB_west" fromLane="0" toLane="0"/>
+    <connection from="BC_west" to="AB_west" fromLane="1" toLane="1"/>
+    <connection from="BC_west" to="AB_west" fromLane="2" toLane="2"/>
+    <!-- BC_west (westbound) to nB_out: right turn north -->
+    <connection from="BC_west" to="nB_out" fromLane="0" toLane="0"/>
+    <connection from="BC_west" to="nB_out" fromLane="0" toLane="1"/>
+    <!-- BC_west (westbound) to sB_out: left turn south -->
+    <connection from="BC_west" to="sB_out" fromLane="2" toLane="0"/>
+    <connection from="BC_west" to="sB_out" fromLane="2" toLane="1"/>
+
+    <!-- nB_in (southbound) to sB_out: straight -->
+    <connection from="nB_in" to="sB_out" fromLane="0" toLane="0"/>
+    <connection from="nB_in" to="sB_out" fromLane="1" toLane="1"/>
+    <!-- nB_in (southbound) to AB_west: right turn west -->
+    <connection from="nB_in" to="AB_west" fromLane="0" toLane="0"/>
+    <connection from="nB_in" to="AB_west" fromLane="0" toLane="1"/>
+    <!-- nB_in (southbound) to BC_east: left turn east -->
+    <connection from="nB_in" to="BC_east" fromLane="1" toLane="1"/>
+    <connection from="nB_in" to="BC_east" fromLane="1" toLane="2"/>
+
+    <!-- sB_in (northbound) to nB_out: straight -->
+    <connection from="sB_in" to="nB_out" fromLane="0" toLane="0"/>
+    <connection from="sB_in" to="nB_out" fromLane="1" toLane="1"/>
+    <!-- sB_in (northbound) to BC_east: right turn east -->
+    <connection from="sB_in" to="BC_east" fromLane="0" toLane="0"/>
+    <connection from="sB_in" to="BC_east" fromLane="0" toLane="1"/>
+    <!-- sB_in (northbound) to AB_west: left turn west -->
+    <connection from="sB_in" to="AB_west" fromLane="1" toLane="1"/>
+    <connection from="sB_in" to="AB_west" fromLane="1" toLane="2"/>
+
+    <!-- INTERSECTION C: eastern terminus T-junction
+         Incoming: BC_east(3), nC_in(2), sC_in(2)
+         Outgoing: BC_west(3), nC_out(2), sC_out(2) -->
+
+    <!-- BC_east (eastbound) to nC_out: left turn north -->
+    <connection from="BC_east" to="nC_out" fromLane="2" toLane="0"/>
+    <connection from="BC_east" to="nC_out" fromLane="2" toLane="1"/>
+    <!-- BC_east (eastbound) to sC_out: right turn south -->
+    <connection from="BC_east" to="sC_out" fromLane="0" toLane="0"/>
+    <connection from="BC_east" to="sC_out" fromLane="1" toLane="1"/>
+
+    <!-- nC_in (southbound) to sC_out: straight -->
+    <connection from="nC_in" to="sC_out" fromLane="0" toLane="0"/>
+    <connection from="nC_in" to="sC_out" fromLane="1" toLane="1"/>
+    <!-- nC_in (southbound) to BC_west: right turn west -->
+    <connection from="nC_in" to="BC_west" fromLane="0" toLane="0"/>
+    <connection from="nC_in" to="BC_west" fromLane="0" toLane="1"/>
+
+    <!-- sC_in (northbound) to nC_out: straight -->
+    <connection from="sC_in" to="nC_out" fromLane="0" toLane="0"/>
+    <connection from="sC_in" to="nC_out" fromLane="1" toLane="1"/>
+    <!-- sC_in (northbound) to BC_west: left turn west -->
+    <connection from="sC_in" to="BC_west" fromLane="1" toLane="1"/>
+    <connection from="sC_in" to="BC_west" fromLane="1" toLane="2"/>
+
+</connections>

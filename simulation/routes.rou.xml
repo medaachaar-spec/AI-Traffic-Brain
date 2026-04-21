@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">
+
+    <!-- ================================================================
+         VEHICLE TYPES
+    ================================================================ -->
+    <vType id="car"
+           accel="2.6" decel="4.5" sigma="0.5" length="5"
+           maxSpeed="13.9" guiShape="passenger"/>
+
+    <vType id="motorcycle"
+           accel="3.5" decel="6.0" sigma="0.6" length="2"
+           maxSpeed="16.7" guiShape="motorcycle" color="0.4,0.4,1"/>
+
+    <vType id="truck"
+           accel="1.3" decel="3.5" sigma="0.4" length="12"
+           maxSpeed="11.1" guiShape="truck" color="0.6,0.4,0.2"/>
+
+    <vType id="bus"
+           accel="1.2" decel="3.0" sigma="0.3" length="14"
+           maxSpeed="11.1" guiShape="bus" color="0.2,0.6,0.2"/>
+
+    <vType id="emergency"
+           accel="3.5" decel="6.0" sigma="0.1" length="6"
+           maxSpeed="22.2" guiShape="emergency"
+           color="1,0,0" speedFactor="1.5" emergencyDecel="9.0"/>
+
+    <vType id="pedestrian_proxy"
+           accel="0.5" decel="2.0" sigma="0.8" length="1"
+           maxSpeed="1.8" guiShape="pedestrian" color="0,0.4,1"/>
+
+    <!-- Internal obstacle type used for accident events -->
+    <vType id="obstacle"
+           accel="0.5" decel="10.0" sigma="0.0" length="8"
+           maxSpeed="2.0" guiShape="passenger" color="1,0.5,0"/>
+
+    <!-- ================================================================
+         ROUTES
+         Naming: WB = westbound, EB = eastbound
+                 T  = through (A to C or C to A)
+                 _N / _S = entering from north / south stub
+    ================================================================ -->
+
+    <!-- Westbound through routes (east->west, morning commute) -->
+    <route id="WB_T_N"   edges="nC_in BC_west AB_west nA_out"/>
+    <route id="WB_T_S"   edges="sC_in BC_west AB_west sA_out"/>
+    <route id="WB_T_NxS" edges="nC_in BC_west AB_west sA_out"/>
+    <route id="WB_T_SxN" edges="sC_in BC_west AB_west nA_out"/>
+
+    <!-- Westbound partial: C to B -->
+    <route id="WB_CB_N"  edges="nC_in BC_west nB_out"/>
+    <route id="WB_CB_S"  edges="sC_in BC_west sB_out"/>
+
+    <!-- Westbound partial: B to A -->
+    <route id="WB_BA_N"  edges="nB_in AB_west nA_out"/>
+    <route id="WB_BA_S"  edges="sB_in AB_west sA_out"/>
+
+    <!-- Eastbound through routes (west->east, evening return) -->
+    <route id="EB_T_N"   edges="nA_in AB_east BC_east nC_out"/>
+    <route id="EB_T_S"   edges="sA_in AB_east BC_east sC_out"/>
+    <route id="EB_T_NxS" edges="nA_in AB_east BC_east sC_out"/>
+    <route id="EB_T_SxN" edges="sA_in AB_east BC_east nC_out"/>
+
+    <!-- Eastbound partial: A to B -->
+    <route id="EB_AB_N"  edges="nA_in AB_east nB_out"/>
+    <route id="EB_AB_S"  edges="sA_in AB_east sB_out"/>
+
+    <!-- Eastbound partial: B to C -->
+    <route id="EB_BC_N"  edges="nB_in BC_east nC_out"/>
+    <route id="EB_BC_S"  edges="sB_in BC_east sC_out"/>
+
+    <!-- North-South cross at B (side street) -->
+    <route id="NS_B"     edges="nB_in sB_out"/>
+    <route id="SN_B"     edges="sB_in nB_out"/>
+
+    <!-- Accident vehicle routes (obstacle stops mid-edge, then exits) -->
+    <route id="ACC_AB"   edges="nA_in AB_east nB_out"/>
+    <route id="ACC_BC"   edges="nB_in BC_east nC_out"/>
+    <route id="ACC_BCW"  edges="nC_in BC_west nB_out"/>
+
+    <!-- ================================================================
+         MORNING PEAK  0 - 1800 s
+         Heavy WESTBOUND commute: 800 cars/h on main boulevard
+         Side streets: 300 cars/h each approach
+    ================================================================ -->
+
+    <!-- Main WB corridor from C (400+400 = 800 cars/h total) -->
+    <flow id="m_WB_car_nC_T"  type="car"         route="WB_T_N"   begin="0" end="1800" vehsPerHour="350" departLane="best" departSpeed="max"/>
+    <flow id="m_WB_car_nC_CB" type="car"         route="WB_CB_N"  begin="0" end="1800" vehsPerHour="50"  departLane="best" departSpeed="max"/>
+    <flow id="m_WB_car_sC_T"  type="car"         route="WB_T_S"   begin="0" end="1800" vehsPerHour="350" departLane="best" departSpeed="max"/>
+    <flow id="m_WB_car_sC_CB" type="car"         route="WB_CB_S"  begin="0" end="1800" vehsPerHour="50"  departLane="best" departSpeed="max"/>
+    <!-- WB motorcycles (80/h) -->
+    <flow id="m_WB_moto_nC"   type="motorcycle"  route="WB_T_N"   begin="0" end="1800" vehsPerHour="40"  departLane="best" departSpeed="max"/>
+    <flow id="m_WB_moto_sC"   type="motorcycle"  route="WB_T_S"   begin="0" end="1800" vehsPerHour="40"  departLane="best" departSpeed="max"/>
+    <!-- WB trucks (40/h) -->
+    <flow id="m_WB_truck_nC"  type="truck"       route="WB_T_N"   begin="0" end="1800" vehsPerHour="20"  departLane="best" departSpeed="max"/>
+    <flow id="m_WB_truck_sC"  type="truck"       route="WB_T_S"   begin="0" end="1800" vehsPerHour="20"  departLane="best" departSpeed="max"/>
+    <!-- WB buses (20/h) -->
+    <flow id="m_WB_bus_nC"    type="bus"         route="WB_T_N"   begin="0" end="1800" vehsPerHour="10"  departLane="best" departSpeed="max"/>
+    <flow id="m_WB_bus_sC"    type="bus"         route="WB_T_S"   begin="0" end="1800" vehsPerHour="10"  departLane="best" departSpeed="max"/>
+
+    <!-- Light EB counter-flow (morning) ~200 cars/h -->
+    <flow id="m_EB_car_nA"    type="car"         route="EB_T_N"   begin="0" end="1800" vehsPerHour="100" departLane="best" departSpeed="max"/>
+    <flow id="m_EB_car_sA"    type="car"         route="EB_T_S"   begin="0" end="1800" vehsPerHour="100" departLane="best" departSpeed="max"/>
+
+    <!-- Side streets at B (~300 cars/h each) -->
+    <flow id="m_NS_B_car"     type="car"         route="NS_B"     begin="0" end="1800" vehsPerHour="150" departLane="best" departSpeed="max"/>
+    <flow id="m_SN_B_car"     type="car"         route="SN_B"     begin="0" end="1800" vehsPerHour="150" departLane="best" departSpeed="max"/>
+    <flow id="m_nB_WB"        type="car"         route="WB_BA_N"  begin="0" end="1800" vehsPerHour="75"  departLane="best" departSpeed="max"/>
+    <flow id="m_sB_EB"        type="car"         route="EB_BC_S"  begin="0" end="1800" vehsPerHour="75"  departLane="best" departSpeed="max"/>
+
+    <!-- Pedestrian proxy on side streets -->
+    <flow id="m_ped_NS"       type="pedestrian_proxy" route="NS_B" begin="0" end="1800" vehsPerHour="30" departLane="best" departSpeed="max"/>
+    <flow id="m_ped_SN"       type="pedestrian_proxy" route="SN_B" begin="0" end="1800" vehsPerHour="30" departLane="best" departSpeed="max"/>
+
+    <!-- ================================================================
+         EVENING PEAK  1800 - 3600 s
+         Heavy EASTBOUND return: 800 cars/h on main boulevard
+         Side streets: 300 cars/h each approach
+    ================================================================ -->
+
+    <!-- Main EB corridor from A (400+400 = 800 cars/h total) -->
+    <flow id="e_EB_car_nA_T"  type="car"         route="EB_T_N"   begin="1800" end="3600" vehsPerHour="350" departLane="best" departSpeed="max"/>
+    <flow id="e_EB_car_nA_AB" type="car"         route="EB_AB_N"  begin="1800" end="3600" vehsPerHour="50"  departLane="best" departSpeed="max"/>
+    <flow id="e_EB_car_sA_T"  type="car"         route="EB_T_S"   begin="1800" end="3600" vehsPerHour="350" departLane="best" departSpeed="max"/>
+    <flow id="e_EB_car_sA_AB" type="car"         route="EB_AB_S"  begin="1800" end="3600" vehsPerHour="50"  departLane="best" departSpeed="max"/>
+    <!-- EB motorcycles -->
+    <flow id="e_EB_moto_nA"   type="motorcycle"  route="EB_T_N"   begin="1800" end="3600" vehsPerHour="40"  departLane="best" departSpeed="max"/>
+    <flow id="e_EB_moto_sA"   type="motorcycle"  route="EB_T_S"   begin="1800" end="3600" vehsPerHour="40"  departLane="best" departSpeed="max"/>
+    <!-- EB trucks -->
+    <flow id="e_EB_truck_nA"  type="truck"       route="EB_T_N"   begin="1800" end="3600" vehsPerHour="20"  departLane="best" departSpeed="max"/>
+    <flow id="e_EB_truck_sA"  type="truck"       route="EB_T_S"   begin="1800" end="3600" vehsPerHour="20"  departLane="best" departSpeed="max"/>
+    <!-- EB buses -->
+    <flow id="e_EB_bus_nA"    type="bus"         route="EB_T_N"   begin="1800" end="3600" vehsPerHour="10"  departLane="best" departSpeed="max"/>
+    <flow id="e_EB_bus_sA"    type="bus"         route="EB_T_S"   begin="1800" end="3600" vehsPerHour="10"  departLane="best" departSpeed="max"/>
+
+    <!-- Light WB counter-flow (evening) -->
+    <flow id="e_WB_car_nC"    type="car"         route="WB_T_N"   begin="1800" end="3600" vehsPerHour="100" departLane="best" departSpeed="max"/>
+    <flow id="e_WB_car_sC"    type="car"         route="WB_T_S"   begin="1800" end="3600" vehsPerHour="100" departLane="best" departSpeed="max"/>
+
+    <!-- Side streets at B (evening) -->
+    <flow id="e_NS_B_car"     type="car"         route="NS_B"     begin="1800" end="3600" vehsPerHour="150" departLane="best" departSpeed="max"/>
+    <flow id="e_SN_B_car"     type="car"         route="SN_B"     begin="1800" end="3600" vehsPerHour="150" departLane="best" departSpeed="max"/>
+    <flow id="e_nB_EB"        type="car"         route="EB_BC_N"  begin="1800" end="3600" vehsPerHour="75"  departLane="best" departSpeed="max"/>
+    <flow id="e_sB_WB"        type="car"         route="WB_BA_S"  begin="1800" end="3600" vehsPerHour="75"  departLane="best" departSpeed="max"/>
+
+    <!-- Pedestrian proxy (evening) -->
+    <flow id="e_ped_NS"       type="pedestrian_proxy" route="NS_B" begin="1800" end="3600" vehsPerHour="30" departLane="best" departSpeed="max"/>
+    <flow id="e_ped_SN"       type="pedestrian_proxy" route="SN_B" begin="1800" end="3600" vehsPerHour="30" departLane="best" departSpeed="max"/>
+
+    <!-- ================================================================
+         ACCIDENT EVENTS
+         Each obstacle vehicle stops on a boulevard lane for 200 s,
+         forcing merging traffic and reducing effective throughput.
+         Accident 1: t=400  on AB_east  (morning rush, westbound jam)
+         Accident 2: t=1100 on BC_east  (mid-morning, cross-town)
+         Accident 3: t=2200 on BC_west  (evening rush, eastbound jam)
+    ================================================================ -->
+
+    <vehicle id="accident_1" type="obstacle" route="ACC_AB" depart="400" departLane="1" departSpeed="0">
+        <stop lane="AB_east_1" startPos="160" endPos="168" duration="200"/>
+    </vehicle>
+
+    <vehicle id="accident_2" type="obstacle" route="ACC_BC" depart="1100" departLane="0" departSpeed="0">
+        <stop lane="BC_east_0" startPos="200" endPos="208" duration="200"/>
+    </vehicle>
+
+    <vehicle id="accident_3" type="obstacle" route="ACC_BCW" depart="2200" departLane="2" departSpeed="0">
+        <stop lane="BC_west_2" startPos="160" endPos="168" duration="200"/>
+    </vehicle>
+
+    <!-- ================================================================
+         EMERGENCY VEHICLES  (15 total, one every ~240 s)
+    ================================================================ -->
+    <vehicle id="ems_01"  type="emergency" route="WB_T_N"   depart="60"   departLane="best" departSpeed="max"/>
+    <vehicle id="ems_02"  type="emergency" route="EB_T_N"   depart="300"  departLane="best" departSpeed="max"/>
+    <vehicle id="ems_03"  type="emergency" route="WB_T_S"   depart="540"  departLane="best" departSpeed="max"/>
+    <vehicle id="ems_04"  type="emergency" route="EB_AB_S"  depart="780"  departLane="best" departSpeed="max"/>
+    <vehicle id="ems_05"  type="emergency" route="WB_CB_N"  depart="1020" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_06"  type="emergency" route="NS_B"     depart="1260" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_07"  type="emergency" route="EB_T_S"   depart="1500" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_08"  type="emergency" route="WB_T_N"   depart="1740" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_09"  type="emergency" route="EB_T_NxS" depart="1980" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_10"  type="emergency" route="WB_CB_S"  depart="2220" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_11"  type="emergency" route="SN_B"     depart="2460" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_12"  type="emergency" route="EB_AB_N"  depart="2700" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_13"  type="emergency" route="WB_T_SxN" depart="2940" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_14"  type="emergency" route="EB_T_N"   depart="3180" departLane="best" departSpeed="max"/>
+    <vehicle id="ems_15"  type="emergency" route="WB_CB_N"  depart="3420" departLane="best" departSpeed="max"/>
+
+</routes>

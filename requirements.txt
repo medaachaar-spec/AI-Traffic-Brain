@@ -1,0 +1,18 @@
+# AI Traffic Brain — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# SUMO TraCI interface
+traci>=1.2.0
+sumolib>=1.2.0
+
+# Dashboard
+streamlit>=1.32.0
+plotly>=5.20.0
+folium>=0.18.0
+streamlit-folium>=0.20.0
+
+# Computer vision (camera simulation / YOLO-style detection)
+# Frame rendering in CameraDetector.render_frame() requires both packages.
+# All detection logic works without them (graceful fallback to pure-Python mode).
+opencv-python>=4.9.0
+numpy>=1.26.0
