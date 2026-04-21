@@ -147,6 +147,6 @@ AI-Traffic-Brain/
 
 ## Authors
 
-**ACHAAR Mohammed Amine** · **ZAKANE Mohamed**
+**ACHAAR Mohammed Amine** 
 Institut National des Postes et Télécommunications (INPT) — Rabat
 Academic year 2025–2026
