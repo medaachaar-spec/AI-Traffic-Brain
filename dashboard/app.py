@@ -16,6 +16,7 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 import streamlit as st
+from dashboard.intersection_diagram import render_intersection
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -26,6 +27,7 @@ MAIN_PY    = ROOT / "main.py"
 FIXED_CSV  = DATA_DIR / "results_fixed.csv"
 SMART_CSV  = DATA_DIR / "results_smart.csv"
 VISION_CSV = DATA_DIR / "results_vision.csv"
+RL_CSV     = DATA_DIR / "results_rl.csv"
 
 # ---------------------------------------------------------------------------
 # Colour palette  ── Smart City Command Center
@@ -33,7 +35,7 @@ VISION_CSV = DATA_DIR / "results_vision.csv"
 C_FIXED   = "#ff9500"   # amber
 C_SMART   = "#00d4ff"   # electric teal
 C_VISION  = "#8b5cf6"   # purple
-C_RL      = "#10b981"   # green
+C_RL      = "#7C3AED"   # purple
 C_WARN    = "#ff4757"   # alert red
 C_TEXT    = "#c8d4f0"
 C_SUBTEXT = "#4a5a7a"
@@ -631,9 +633,14 @@ with st.sidebar:
 fixed  = load_csv(FIXED_CSV)
 smart  = load_csv(SMART_CSV)
 vision = load_csv(VISION_CSV)
+rl     = load_csv(RL_CSV)
 
 both          = fixed is not None and smart is not None
 vision_avail  = vision is not None
+rl_avail      = rl is not None
+
+fixed_rows    = len(col(fixed, "sim_time")) if fixed else 0
+fixed_partial = fixed_rows > 0 and fixed_rows < 3000
 
 if not vision_avail:
     st.warning(
@@ -766,24 +773,28 @@ if not both:
 avg_wait_f = safe_mean(col(fixed,  "total_waiting_time"))
 avg_wait_s = safe_mean(col(smart,  "total_waiting_time"))
 avg_wait_v = safe_mean(col(vision, "total_waiting_time")) if vision_avail else None
+avg_wait_r = safe_mean(col(rl,     "total_waiting_time")) if rl_avail     else None
 
 pct_s = pct_change(avg_wait_s, avg_wait_f)
 pct_v = pct_change(avg_wait_v, avg_wait_f) if avg_wait_v is not None else None
+pct_r = pct_change(avg_wait_r, avg_wait_f) if avg_wait_r is not None else None
 
 peak_q_f = safe_max(total_queue(fixed))
 peak_q_s = safe_max(total_queue(smart))
 peak_q_v = safe_max(total_queue(vision)) if vision_avail else None
+peak_q_r = safe_max(total_queue(rl))     if rl_avail     else None
 
 emg_steps_f = sum(1 for v in col(fixed,  "emergency_count") if isinstance(v, (int,float)) and v > 0)
 emg_steps_s = sum(1 for v in col(smart,  "emergency_count") if isinstance(v, (int,float)) and v > 0)
 emg_steps_v = sum(1 for v in col(vision, "emergency_count") if isinstance(v, (int,float)) and v > 0) if vision_avail else None
+emg_steps_r = sum(1 for v in col(rl,     "emergency_count") if isinstance(v, (int,float)) and v > 0) if rl_avail     else None
 
 # ---------------------------------------------------------------------------
 # ── SECTION 1 — KPI cards
 # ---------------------------------------------------------------------------
 st.html('<div class="sec">Key Performance Indicators</div>')
 
-k1, k2, k3, k4 = st.columns(4)
+k1, k2, k3, k4, k5 = st.columns(5)
 
 def kpi_card(widget, label, value, delta_html, delta_cls, accent=C_TEXT):
     glow = accent.replace("#", "")
@@ -799,11 +810,16 @@ def kpi_card(widget, label, value, delta_html, delta_cls, accent=C_TEXT):
             </div>"""
     )
 
+_fixed_delta = (
+    f'<span style="color:{C_FIXED};font-family:\'Space Mono\',monospace;">●</span>'
+    f'&nbsp; baseline reference'
+    + (f' &nbsp;<span style="color:#f59e0b;font-size:0.65rem;">⚠ Partial data ({fixed_rows} rows)</span>'
+       if fixed_partial else "")
+)
 kpi_card(k1,
     "Avg Waiting — Fixed",
     f"{avg_wait_f:,.1f} s",
-    f'<span style="color:{C_FIXED};font-family:\'Space Mono\',monospace;">●</span>'
-    f'&nbsp; baseline reference',
+    _fixed_delta,
     "muted", C_FIXED,
 )
 
@@ -832,6 +848,8 @@ else:
 candidates = [("Smart", avg_wait_s, pct_s, C_SMART)]
 if vision_avail and pct_v is not None:
     candidates.append(("Vision", avg_wait_v, pct_v, C_VISION))
+if rl_avail and pct_r is not None:
+    candidates.append(("RL", avg_wait_r, pct_r, C_RL))
 best_name, best_wait, best_pct, best_col = max(candidates, key=lambda x: x[2])
 
 kpi_card(k4,
@@ -840,6 +858,21 @@ kpi_card(k4,
     f"▼ {best_pct:.1f}% less waiting vs Fixed",
     "good", best_col,
 )
+
+if rl_avail and pct_r is not None:
+    r_lbl, r_cls = delta_label(pct_r)
+    kpi_card(k5,
+        "Avg Waiting — RL",
+        f"{avg_wait_r:,.1f} s",
+        r_lbl, r_cls, C_RL,
+    )
+else:
+    kpi_card(k5,
+        "Avg Waiting — RL",
+        "—",
+        "Run RL simulation to compare",
+        "muted", C_RL,
+    )
 
 st.html("<br>")
 
@@ -941,6 +974,15 @@ if vision_avail:
         line=dict(color=C_VISION, width=2.5, dash="dot"),
         hovertemplate="t=%{x:.0f}s<br>wait=%{y:.1f}s<extra>Vision</extra>",
     ))
+if rl_avail:
+    t_r  = col(rl, "sim_time")
+    wt_r = rolling_mean(col(rl, "total_waiting_time"), WINDOW)
+    fig_line.add_trace(go.Scatter(
+        x=t_r, y=wt_r,
+        name="RL",
+        line=dict(color=C_RL, width=2.5, dash="dot"),
+        hovertemplate="t=%{x:.0f}s<br>wait=%{y:.1f}s<extra>RL</extra>",
+    ))
 fig_line.update_layout(**{
     **PLOTLY_BASE,
     "height": 340,
@@ -962,7 +1004,8 @@ INT_COLS = [("int_A", "intA_wait", C_FIXED),
 fig_int = go.Figure()
 for ds, ds_name, ds_color in [(fixed, "Fixed", C_FIXED),
                                (smart, "Smart", C_SMART)] + (
-                              [(vision, "Vision", C_VISION)] if vision_avail else []):
+                              [(vision, "Vision", C_VISION)] if vision_avail else []) + (
+                              [(rl, "RL", C_RL)] if rl_avail else []):
     for int_id, int_col_key, int_color in INT_COLS:
         raw = col(ds, int_col_key)
         if not raw:
@@ -975,7 +1018,8 @@ for ds, ds_name, ds_color in [(fixed, "Fixed", C_FIXED),
             line=dict(
                 color=int_color, width=1.8,
                 dash="solid" if ds_name == "Fixed"
-                     else ("dash" if ds_name == "Smart" else "dot"),
+                     else ("dash" if ds_name == "Smart"
+                     else ("dot" if ds_name == "Vision" else "dashdot")),
             ),
             hovertemplate=f"{ds_name} {int_id}: %{{y:.1f}}s<extra></extra>",
         ))
@@ -1020,6 +1064,15 @@ if vision_avail:
         marker_color=C_VISION,
         marker_line=dict(width=0),
         text=peak_v_bars, textposition="outside",
+        textfont=dict(color=C_TEXT, size=12, family="'Space Mono', monospace"),
+    ))
+if rl_avail:
+    peak_r_bars = [int(safe_max(col(rl, c))) for c in q_cols]
+    fig_bar.add_trace(go.Bar(
+        name="RL", x=approaches, y=peak_r_bars,
+        marker_color=C_RL,
+        marker_line=dict(width=0),
+        text=peak_r_bars, textposition="outside",
         textfont=dict(color=C_TEXT, size=12, family="'Space Mono', monospace"),
     ))
 fig_bar.update_layout(**{
@@ -1071,15 +1124,42 @@ def make_area(d: dict, title: str) -> go.Figure:
     })
     return fig
 
-if vision_avail:
+if vision_avail and rl_avail:
+    a1, a2, a3, a4 = st.columns(4)
+    with a1: st.plotly_chart(make_area(fixed,  "Fixed"),  use_container_width=True)
+    with a2: st.plotly_chart(make_area(smart,  "Smart"),  use_container_width=True)
+    with a3: st.plotly_chart(make_area(vision, "Vision"), use_container_width=True)
+    with a4: st.plotly_chart(make_area(rl,     "RL"),     use_container_width=True)
+elif vision_avail:
     a1, a2, a3 = st.columns(3)
     with a1: st.plotly_chart(make_area(fixed,  "Fixed"),  use_container_width=True)
     with a2: st.plotly_chart(make_area(smart,  "Smart"),  use_container_width=True)
     with a3: st.plotly_chart(make_area(vision, "Vision"), use_container_width=True)
+elif rl_avail:
+    a1, a2, a3 = st.columns(3)
+    with a1: st.plotly_chart(make_area(fixed, "Fixed"), use_container_width=True)
+    with a2: st.plotly_chart(make_area(smart, "Smart"), use_container_width=True)
+    with a3: st.plotly_chart(make_area(rl,    "RL"),    use_container_width=True)
 else:
     a1, a2 = st.columns(2)
     with a1: st.plotly_chart(make_area(fixed, "Fixed"), use_container_width=True)
     with a2: st.plotly_chart(make_area(smart, "Smart"), use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# ── SECTION 6b — Intersection Diagram
+# ---------------------------------------------------------------------------
+st.html('<div class="sec">Live Intersection View</div>')
+
+_best = rl if rl_avail else (vision if vision_avail else smart)
+_diag_cols = st.columns([1, 2, 1])
+with _diag_cols[1]:
+    render_intersection(
+        width=420,
+        north_wait=safe_mean(col(_best, "north_wait")),
+        south_wait=safe_mean(col(_best, "south_wait")),
+        east_wait =safe_mean(col(_best, "east_wait")),
+        west_wait =safe_mean(col(_best, "west_wait")),
+    )
 
 # ---------------------------------------------------------------------------
 # ── SECTION 7 — Camera Intelligence
@@ -1257,6 +1337,8 @@ with emg_left:
     datasets = [(fixed, "Fixed", C_FIXED), (smart, "Smart", C_SMART)]
     if vision_avail:
         datasets.append((vision, "Vision", C_VISION))
+    if rl_avail:
+        datasets.append((rl, "RL", C_RL))
 
     for d, name, color in datasets:
         t_all   = col(d, "sim_time")
@@ -1295,40 +1377,51 @@ with emg_right:
     t_f2  = col(fixed, "sim_time")
     t_s2  = col(smart, "sim_time")
 
+    emg_r = col(rl, "emergency_count") if rl_avail else []
+    t_r2  = col(rl, "sim_time")        if rl_avail else []
+
     rows_emg = [
         ("Total emergency steps",
          str(emg_steps_f), str(emg_steps_s),
-         str(emg_steps_v) if vision_avail else "—"),
+         str(emg_steps_v) if vision_avail else "—",
+         str(emg_steps_r) if rl_avail else "—"),
         ("Peak simultaneous lanes",
          str(int(safe_max(emg_f))), str(int(safe_max(emg_s))),
-         str(int(safe_max(col(vision, "emergency_count")))) if vision_avail else "—"),
+         str(int(safe_max(col(vision, "emergency_count")))) if vision_avail else "—",
+         str(int(safe_max(emg_r))) if rl_avail else "—"),
         ("First emergency at (s)",
          str(_first(t_f2, emg_f) or "—"), str(_first(t_s2, emg_s) or "—"),
          str(_first(col(vision,"sim_time"), col(vision,"emergency_count")) or "—")
-         if vision_avail else "—"),
+         if vision_avail else "—",
+         str(_first(t_r2, emg_r) or "—") if rl_avail else "—"),
         ("Last emergency at (s)",
          str(_last(t_f2, emg_f) or "—"), str(_last(t_s2, emg_s) or "—"),
          str(_last(col(vision,"sim_time"), col(vision,"emergency_count")) or "—")
-         if vision_avail else "—"),
+         if vision_avail else "—",
+         str(_last(t_r2, emg_r) or "—") if rl_avail else "—"),
     ]
 
     head_vision = f'<th><span class="badge bv">Vision</span></th>' if vision_avail else ""
+    head_rl     = f'<th><span class="badge" style="background:{C_RL}22;color:{C_RL};border:1px solid {C_RL}44;">RL</span></th>' if rl_avail else ""
     html = f"""<table class="emg-tbl">
       <thead><tr>
         <th>Metric</th>
         <th><span class="badge bf">Fixed</span></th>
         <th><span class="badge bs">Smart</span></th>
         {head_vision}
+        {head_rl}
       </tr></thead><tbody>"""
     for row in rows_emg:
         metric = row[0]
         fv, sv = row[1], row[2]
         vv     = row[3] if vision_avail else None
+        rv     = row[4] if rl_avail else None
         vis_td = f"<td style='color:{C_VISION};font-weight:700;font-family:\"Space Mono\",monospace;'>{vv}</td>" if vv is not None else ""
+        rl_td  = f"<td style='color:{C_RL};font-weight:700;font-family:\"Space Mono\",monospace;'>{rv}</td>"    if rv is not None else ""
         html += (f"<tr><td style='color:#6b7a9e;'>{metric}</td>"
                  f"<td style='color:{C_FIXED};font-weight:700;font-family:\"Space Mono\",monospace;'>{fv}</td>"
                  f"<td style='color:{C_SMART};font-weight:700;font-family:\"Space Mono\",monospace;'>{sv}</td>"
-                 f"{vis_td}</tr>")
+                 f"{vis_td}{rl_td}</tr>")
     html += "</tbody></table>"
     st.html(html)
 
@@ -1340,6 +1433,8 @@ csvs_note = (
     "<code style='color:#2a3a5a;font-family:\"Space Mono\",monospace;'>results_smart.csv</code>"
     + (", <code style='color:#2a3a5a;font-family:\"Space Mono\",monospace;'>results_vision.csv</code>"
        if vision_avail else "")
+    + (", <code style='color:#2a3a5a;font-family:\"Space Mono\",monospace;'>results_rl.csv</code>"
+       if rl_avail else "")
 )
 st.html(f"""
 <div class="footer">

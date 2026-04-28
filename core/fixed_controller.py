@@ -3,9 +3,9 @@ FixedController — time-based traffic light controller for 3-intersection netwo
 
 All three nodes (int_A, int_B, int_C) are driven on the same rigid schedule:
   Phase 0 — North/South GREEN   (30 s)
-  Phase 1 — North/South YELLOW  ( 5 s)
+  Phase 1 — North/South YELLOW  ( 3 s)   ← matches SUMO net.xml and SmartController
   Phase 2 — East/West   GREEN   (30 s)
-  Phase 3 — East/West   YELLOW  ( 5 s)
+  Phase 3 — East/West   YELLOW  ( 3 s)   ← matches SUMO net.xml and SmartController
 
 env.set_phase() broadcasts the same phase index to all three TL nodes
 simultaneously, so no per-node logic is needed here.
@@ -32,9 +32,9 @@ class Phase:
 
 PHASES: list[Phase] = [
     Phase(index=0, name="NS_GREEN",  duration=30.0),
-    Phase(index=1, name="NS_YELLOW", duration=5.0),
+    Phase(index=1, name="NS_YELLOW", duration=3.0),   # matches SUMO net.xml and SmartController
     Phase(index=2, name="EW_GREEN",  duration=30.0),
-    Phase(index=3, name="EW_YELLOW", duration=5.0),
+    Phase(index=3, name="EW_YELLOW", duration=3.0),   # matches SUMO net.xml and SmartController
 ]
 
 CYCLE_LENGTH: float = sum(p.duration for p in PHASES)   # 70 s

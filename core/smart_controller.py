@@ -230,6 +230,13 @@ class SmartController:
     def current_phase(self) -> int:
         return _STATE_PHASE[self._nodes["int_B"].state]
 
+    def reset_trackers(self) -> None:
+        """Reset running-max normalisation trackers without resetting the FSM state."""
+        self._maxes = {
+            tl_id: {"NS": _MaxTracker(), "EW": _MaxTracker()}
+            for tl_id in ["int_A", "int_B", "int_C"]
+        }
+
     def summary(self) -> dict:
         return {
             "total_steps": self._total_steps,
@@ -305,12 +312,13 @@ class SmartController:
 
         if self._should_advance(ns, ns_pressure, ew_eff, sim_time, effective_max):
             old_state = ns.state
+            elapsed   = ns.state_elapsed   # capture before _advance() resets it to 0
             self._advance(ns, dt)
             self._apply_phase(ns)
             action["switched"]  = True
             action["new_phase"] = ns.state.value
             action["state"]     = ns.state.value
-            action["reason"]    = self._advance_reason(old_state, ns_pressure, ew_eff, effective_max)
+            action["reason"]    = self._advance_reason(old_state, ns_pressure, ew_eff, effective_max, elapsed)
             self._emit_coordination(ns, sim_time)
 
         return action
@@ -376,16 +384,15 @@ class SmartController:
         ns_p: float,
         ew_p: float,
         effective_max: float,
+        elapsed: float,
     ) -> str:
         if old_state in (_State.NS_YELLOW, _State.EW_YELLOW):
             return "yellow_end"
+        if elapsed >= effective_max:
+            return "congestion_max" if effective_max > MAX_GREEN else "max_green"
         if old_state == _State.NS_GREEN:
-            if ew_p >= effective_max:
-                return "congestion_max" if effective_max > MAX_GREEN else "max_green"
             return "wave_bias" if ew_p >= SWITCH_RATIO else "pressure_ew"
         if old_state == _State.EW_GREEN:
-            if ns_p >= effective_max:
-                return "congestion_max" if effective_max > MAX_GREEN else "max_green"
             return "pressure_ns"
         return "smart_cycle"
 

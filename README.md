@@ -15,7 +15,7 @@ Average vehicle waiting time across a full simulation episode:
 
 | Controller | Avg Waiting Time | vs Fixed |
 |---|---|---|
-| Fixed (30 s / 5 s cycle) | 241 s | baseline |
+| Fixed (30 s / 3 s cycle) | 241 s | baseline |
 | Smart (demand-adaptive) | 213 s | −12 % |
 | RL (Q-learning, pretrained) | 183 s | −24 % |
 
@@ -25,7 +25,7 @@ Average vehicle waiting time across a full simulation episode:
 
 | Mode | Description |
 |---|---|
-| **Fixed** | Classic 30 s green / 5 s yellow cycle, same timing for all intersections |
+| **Fixed** | Classic 30 s green / 3 s yellow cycle, same timing for all intersections |
 | **Smart** | Normalised pressure-based FSM with green-wave coordination and congestion relief |
 | **Vision** | Smart controller augmented with a camera bridge for per-vehicle type detection |
 | **RL** | Tabular Q-learning agent with phase-aware state (11 features) and imitation pretraining from Smart |

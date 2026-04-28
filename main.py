@@ -382,6 +382,13 @@ def run(mode: str, gui: bool, cfg: str,
         controller = VisionBridgeController(env)
     elif mode == "hybrid":
         qtable_path = Path(qtable) if qtable else data_dir / "qtable.pkl"
+        if not qtable_path.exists():
+            logger.warning(
+                "Hybrid mode: Q-table not found at %s — RL has no knowledge and will "
+                "never override Smart (max_q=0 < threshold=%.1f). "
+                "Train first with:  python main.py --mode rl-train",
+                qtable_path, HYBRID_CONFIDENCE_THRESHOLD,
+            )
         controller  = HybridController(env, qtable_path=qtable_path)
     else:  # rl
         qtable_path = Path(qtable) if qtable else data_dir / "qtable.pkl"
@@ -564,8 +571,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=100,
         metavar="N",
-        help="Number of episodes. For rl-train: training episodes (default 100). "
-             "For hybrid: test episodes to run (default 100; use 3 for a quick test).",
+        help="Number of simulation episodes to run (default 100). "
+             "For rl-train/rl-pretrain: training episodes. "
+             "For inference modes (fixed/smart/vision/rl/hybrid): evaluation episodes.",
     )
     parser.add_argument(
         "--qtable",
@@ -619,7 +627,6 @@ if __name__ == "__main__":
             seed=args.seed,
         )
     else:
-        ep = args.episodes if args.mode == "hybrid" else 1
         run(mode=args.mode, gui=args.gui, cfg=args.cfg,
-            qtable=args.qtable, no_csv=args.no_csv, episodes=ep,
+            qtable=args.qtable, no_csv=args.no_csv, episodes=args.episodes,
             seed=args.seed)

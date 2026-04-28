@@ -53,7 +53,7 @@ Reward (v4 — scaled for stability)
     - roundabout_overflow * 5.0    (B_inside > 8)
     + emergency_cleared * 100.0    (emergency vehicle just cleared)
     - starvation_penalty * 10.0    (count of approaches with wait > 120 s)
-  Normalised by dividing by 1000 → range roughly -100 … +100 per step.
+  Normalised by dividing by 100 → range roughly -10 … +10 per step.
 
 Anti-oscillation
 ----------------
@@ -626,8 +626,10 @@ class RLController:
 
         total_steps = 0
         new_entries = 0
+        base_seed = self.env.seed
 
         for ep in range(1, episodes + 1):
+            self.env.seed = base_seed + ep - 1   # unique traffic pattern per episode
             smart = SmartController(self.env)
             self.env.start()
             smart.reset()
@@ -709,8 +711,10 @@ class RLController:
             episodes, EPS_START, EPS_MIN,
         )
 
+        base_seed = self.env.seed
         for ep in range(1, episodes + 1):
             ep_start    = __import__("time").perf_counter()
+            self.env.seed = base_seed + ep - 1   # unique traffic pattern per episode
             self.env.start()
             self.reset()
 

@@ -474,7 +474,10 @@ class CameraDetector:
         regular  = count - emg_slot
 
         if emg_slot:
-            result[f"ems_sim_{lane_id}"] = "emergency"
+            # Prefix must NOT start with "ems" so this synthetic ID cannot pass
+            # _is_emergency() and trigger false overrides.  Emergency presence is
+            # already captured by has_emergency on the parent lane_data.
+            result[f"fallback_emg_{lane_id}"] = "car"
 
         type_weights = [
             ("car",        0.70),

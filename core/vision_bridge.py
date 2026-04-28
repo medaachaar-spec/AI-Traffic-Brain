@@ -350,6 +350,21 @@ class VisionBridgeController:
         priority over the normal inter-green gap.
         """
         target_green = _PHASE_NS_GREEN if emg_axis == "NS" else _PHASE_EW_GREEN
+        current_phase = net_state.intersections[tl_id].phase_index
+
+        # Insert a yellow transition before jumping to the opposite green so
+        # SUMO vehicles have time to stop (prevents teleports/collisions).
+        if current_phase in _GREEN_PHASES and current_phase != target_green:
+            yellow = (
+                _PHASE_NS_YELLOW if current_phase == _PHASE_NS_GREEN
+                else _PHASE_EW_YELLOW
+            )
+            try:
+                self.env.set_phase_at(tl_id, yellow)
+            except Exception as exc:
+                logger.warning("Override yellow set failed for %s: %s", tl_id, exc)
+                return
+
         try:
             self.env.set_phase_at(tl_id, target_green)
         except Exception as exc:
