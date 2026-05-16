@@ -57,7 +57,7 @@ Reward (v4 — scaled for stability)
 
 Anti-oscillation
 ----------------
-  MIN_GREEN = 8 s: RL cannot switch a green phase until 8 s have elapsed.
+  MIN_GREEN_TIME = 10 s: RL cannot switch a green phase until 10 s have elapsed.
 
 Hybrid confidence
 -----------------
@@ -98,7 +98,7 @@ EPS_START = 0.9    # initial exploration rate
 EPS_MIN   = 0.01   # floor for exploration
 EPS_DECAY = 0.98   # multiplicative decay per episode
 
-MIN_GREEN = 8.0    # s — minimum time on a green phase before switching (anti-oscillation)
+MIN_GREEN_TIME = 10.0  # s — minimum time on a green phase before switching (anti-oscillation)
 
 # Reward weights
 W_THROUGHPUT          =  10.0   # cars passed this step
@@ -110,7 +110,7 @@ W_STARVATION          =  10.0   # approach waiting > 120 s
 STARVATION_THRESHOLD  = 500.0   # s — waiting time that triggers starvation penalty
 OVERFLOW_THRESHOLD    =   8     # vehicles — B_inside above this = overflow
 
-W_SWITCH_PENALTY      =   2.0   # cost subtracted from reward each time RL triggers a phase switch
+W_SWITCH_PENALTY      =   8.0   # cost subtracted from reward each time RL triggers a phase switch
 W_QUEUE_PENALTY       =   0.1   # cost per queued vehicle across all approaches (direct congestion signal)
 
 REWARD_BASELINE_WINDOW = 100    # steps in the moving-average baseline (advantage-like normalisation)
@@ -491,6 +491,7 @@ class RLController:
         action     = self._apply_min_green(raw_action, net_state)
 
         switched_nodes = self._apply_action(action, net_state)
+        real_phase_changes = len(switched_nodes)
         self._prev_switched = bool(switched_nodes)
 
         for tl_id in switched_nodes:
@@ -504,6 +505,7 @@ class RLController:
             "state":          f"phase_{iB.phase_index}",
             "phase":          f"phase_{iB.phase_index}",
             "switched":       bool(switched_nodes),
+            "switched_count": real_phase_changes,
             "reason":         "rl_policy_v3",
             "action":         action,
             "reward":         round(reward, 2),
@@ -710,26 +712,34 @@ class RLController:
             "RL training started: %d episodes, eps=%.2f -> %.2f",
             episodes, EPS_START, EPS_MIN,
         )
+        print(
+            f"[RLController] Min-green enforcement ACTIVE: MIN_GREEN_TIME={MIN_GREEN_TIME:.0f}s  "
+            f"W_SWITCH_PENALTY={W_SWITCH_PENALTY:.1f}"
+        )
 
         base_seed = self.env.seed
+        all_real_switches: list[int] = []
+
         for ep in range(1, episodes + 1):
             ep_start    = __import__("time").perf_counter()
             self.env.seed = base_seed + ep - 1   # unique traffic pattern per episode
             self.env.start()
             self.reset()
 
-            step        = 0
-            ep_reward   = 0.0
-            ep_switches = 0
+            step               = 0
+            ep_reward          = 0.0
+            ep_action_switches = 0   # sum of action bits (RL intent)
+            ep_real_switches   = 0   # actual SUMO phase transitions triggered
 
             try:
                 while True:
                     net_state = self.env.step()
                     act_dict  = self.update(net_state)
 
-                    ep_reward   += act_dict["reward"]
-                    ep_switches += sum(act_dict["action"])
-                    step        += 1
+                    ep_reward          += act_dict["reward"]
+                    ep_action_switches += sum(act_dict["action"])
+                    ep_real_switches   += act_dict.get("switched_count", 0)
+                    step               += 1
 
                     if traci.simulation.getMinExpectedNumber() == 0:
                         break
@@ -738,21 +748,39 @@ class RLController:
             finally:
                 self.env.close()
 
+            all_real_switches.append(ep_real_switches)
             self._epsilon = max(EPS_MIN, self._epsilon * EPS_DECAY)
 
             ep_elapsed = __import__("time").perf_counter() - ep_start
             logger.info(
                 "Episode %3d/%d | steps=%4d | reward=%10.1f | "
-                "switches=%4d | eps=%.4f | wall=%.1fs | qtable=%d",
+                "action_switches=%4d | real_phase_changes=%4d | "
+                "eps=%.4f | wall=%.1fs | qtable=%d",
                 ep, episodes, step, ep_reward,
-                ep_switches, self._epsilon,
-                ep_elapsed, len(self._qtable),
+                ep_action_switches, ep_real_switches,
+                self._epsilon, ep_elapsed, len(self._qtable),
+            )
+            print(
+                f"[RLController] ep={ep:3d}/{episodes} | "
+                f"action_switches={ep_action_switches:4d} | "
+                f"real_phase_changes={ep_real_switches:4d} | "
+                f"reward={ep_reward:8.1f}"
             )
 
             self._save_qtable()
 
         self.training = False
-        logger.info("Training complete. Q-table entries: %d", len(self._qtable))
+        avg_real = sum(all_real_switches) / len(all_real_switches) if all_real_switches else 0.0
+        print(
+            f"\n[RLController] Training complete."
+            f"\n  Average real phase changes/episode : {avg_real:.1f}"
+            f"\n  Final Q-table size                : {len(self._qtable):,} entries"
+            f"\n  Min-green enforcement             : MIN_GREEN_TIME={MIN_GREEN_TIME:.0f}s (ACTIVE)"
+        )
+        logger.info(
+            "Training complete. Q-table entries: %d | avg real switches/ep: %.1f",
+            len(self._qtable), avg_real,
+        )
 
     # ------------------------------------------------------------------
     # Properties / diagnostics
@@ -815,7 +843,7 @@ class RLController:
     ) -> tuple[int, int, int]:
         """
         Override any switch action on an intersection that hasn't yet served
-        MIN_GREEN (8 s) on its current green phase.  Also suppresses switch
+        MIN_GREEN_TIME (10 s) on its current green phase.  Also suppresses switch
         requests while an intersection is in yellow.
         """
         result = list(action)
@@ -834,7 +862,7 @@ class RLController:
                 result[i] = _PHASE_TO_ACTION[tl_id].get(dest_green, result[i])
                 continue
 
-            if self._elapsed.get(tl_id, 0.0) < MIN_GREEN:
+            if self._elapsed.get(tl_id, 0.0) < MIN_GREEN_TIME:
                 result[i] = _PHASE_TO_ACTION[tl_id][current_phase]
 
         return tuple(result)  # type: ignore[return-value]

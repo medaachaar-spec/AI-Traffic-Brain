@@ -1214,7 +1214,11 @@ function maybeLog(dt) {{
   renderLog();
 }}
 
-// ── Vehicle type definitions ────────────────────────────────────────────────
+// ── Vehicle demo model ───────────────────────────────────────────────────────
+// This is intentionally a visual demo, not the SUMO/RL simulator. Vehicles
+// follow lane waypoints, obey red/yellow stop gates, and keep simple same-lane
+// spacing. There are no intersection locks, exit-lane blockers, or conflict
+// zones here, so bad lock state cannot freeze the animation.
 const ROUTE_DEFS = [
   {{ id:'W-E',  weight:4 }},
   {{ id:'E-W',  weight:4 }},
@@ -1233,6 +1237,10 @@ const TYPE_DEFS = [
   {{ type:'emergency', color:'#ef4444', w:12, h:7,  spd:1.70, weight:1 }},
 ];
 
+const MIN_LANE_GAP = 34;
+const SLOWDOWN_DISTANCE = 88;
+const SIGNAL_STOP_BUFFER = 14;
+
 function pickRandom(arr) {{
   const total = arr.reduce((s,a) => s+(a.weight||1), 0);
   let r = Math.random() * total;
@@ -1240,32 +1248,8 @@ function pickRandom(arr) {{
   return arr[arr.length-1];
 }}
 
-function pickManeuver(isEmergency=false) {{
-  if (isEmergency && MODE==='EMERGENCY') return 'straight';
-  const r = Math.random();
-  if (r < 0.60) return 'straight';
-  if (r < 0.80) return 'right';
-  return 'left';
-}}
-
-// ── PATH HELPERS ─────────────────────────────────────────────────────────────
-// Each route has a canonical lane-centre coordinate so all vehicles on the
-// same route travel on exactly the same pixel track.
-
-function canonicalY(route, g) {{
-  // Default visible lane center for helpers: inner lane of the right-hand carriageway.
-  if (route==='W-E') return laneCoordForDir({{x:0,y:g.roadY}}, {{x:1,y:0}}, g, 1).y;
-  if (route==='E-W') return laneCoordForDir({{x:0,y:g.roadY}}, {{x:-1,y:0}}, g, 1).y;
-  return g.roadY;
-}}
-
-function canonicalX(route, g) {{
-  // Default visible lane center for helpers: inner lane of the right-hand carriageway.
-  if (route==='NA-S') return laneCoordForDir({{x:g.axA,y:g.roadY}}, {{x:0,y:1}}, g, 1).x;
-  if (route==='S-NA') return laneCoordForDir({{x:g.axA,y:g.roadY}}, {{x:0,y:-1}}, g, 1).x;
-  if (route==='SC-N') return laneCoordForDir({{x:g.axC,y:g.roadY}}, {{x:0,y:-1}}, g, 1).x;
-  if (route==='N-SC') return laneCoordForDir({{x:g.axC,y:g.roadY}}, {{x:0,y:1}}, g, 1).x;
-  return 0;
+function dist(a,b) {{
+  return Math.hypot(b.x-a.x, b.y-a.y);
 }}
 
 function routeDirection(route) {{
@@ -1279,26 +1263,20 @@ function routeDirection(route) {{
   }}[route] || {{x:1,y:0}};
 }}
 
-function turnDirection(dir, maneuver) {{
-  if (maneuver === 'right') return {{x:-dir.y, y:dir.x}};
-  if (maneuver === 'left')  return {{x:dir.y, y:-dir.x}};
-  return {{...dir}};
+function axisForDir(dir) {{
+  return Math.abs(dir.x) > 0 ? 'ew' : 'ns';
 }}
 
 function rightNormal(dir) {{
   return {{x:-dir.y, y:dir.x}};
 }}
 
-function laneForManeuver(maneuver, isEmergency=false) {{
+function laneForRouteType(routeType, isEmergency=false) {{
   if (isEmergency) return 1;
-  if (maneuver === 'right') return 2;  // outer/rightmost lane
-  if (maneuver === 'left') return 1;   // inner/median-side lane
-  return Math.random() < 0.5 ? 1 : 2;  // straight can use either lane
+  return Math.random() < 0.5 ? 1 : 2;
 }}
 
-function outboundLaneForManeuver(maneuver, inboundLane) {{
-  if (maneuver === 'right') return 2;
-  if (maneuver === 'left') return 1;
+function outboundLaneForRouteType(routeType, inboundLane) {{
   return inboundLane;
 }}
 
@@ -1306,15 +1284,18 @@ function laneOffset(laneIndex, g) {{
   return g.laneW * (laneIndex === 2 ? 1.5 : 0.5);
 }}
 
-function routeTurnNode(route, g) {{
-  if (route === 'W-E' || route === 'E-W') return {{key:'B', x:g.axB, y:g.roadY}};
-  if (route === 'NA-S' || route === 'S-NA') return {{key:'A', x:g.axA, y:g.roadY}};
-  return {{key:'C', x:g.axC, y:g.roadY}};
+function nodeForKey(key, g) {{
+  return {{
+    A: {{key:'A', x:g.axA, y:g.roadY}},
+    B: {{key:'B', x:g.axB, y:g.roadY}},
+    C: {{key:'C', x:g.axC, y:g.roadY}},
+  }}[key];
 }}
 
-function laneIdForDir(nodeKey, dir, laneIndex=1) {{
-  if (Math.abs(dir.x) > 0) return `H:${{dir.x > 0 ? 'E' : 'W'}}:L${{laneIndex}}`;
-  return `V:${{nodeKey}}:${{dir.y > 0 ? 'S' : 'N'}}:L${{laneIndex}}`;
+function routeTurnNode(route, g) {{
+  if (route === 'W-E' || route === 'E-W') return nodeForKey('B', g);
+  if (route === 'NA-S' || route === 'S-NA') return nodeForKey('A', g);
+  return nodeForKey('C', g);
 }}
 
 function laneCoordForDir(node, dir, g, laneIndex=1) {{
@@ -1323,11 +1304,33 @@ function laneCoordForDir(node, dir, g, laneIndex=1) {{
   return {{ x: node.x + rn.x * off, y: node.y + rn.y * off }};
 }}
 
-function routeStart(route, g, startOffset=0, laneIndex=1) {{
+function laneIdForRoute(route, laneIndex=1, routeType='approach') {{
+  return `${{route}}:${{routeType}}:L${{laneIndex}}`;
+}}
+
+function approachLaneId(route, laneIndex=1) {{
+  return laneIdForRoute(route, laneIndex, 'approach');
+}}
+
+function canonicalY(route, g) {{
+  if (route==='W-E') return laneCoordForDir({{x:0,y:g.roadY}}, {{x:1,y:0}}, g, 1).y;
+  if (route==='E-W') return laneCoordForDir({{x:0,y:g.roadY}}, {{x:-1,y:0}}, g, 1).y;
+  return g.roadY;
+}}
+
+function canonicalX(route, g) {{
+  if (route==='NA-S') return laneCoordForDir(nodeForKey('A', g), {{x:0,y:1}}, g, 1).x;
+  if (route==='S-NA') return laneCoordForDir(nodeForKey('A', g), {{x:0,y:-1}}, g, 1).x;
+  if (route==='SC-N') return laneCoordForDir(nodeForKey('C', g), {{x:0,y:-1}}, g, 1).x;
+  if (route==='N-SC') return laneCoordForDir(nodeForKey('C', g), {{x:0,y:1}}, g, 1).x;
+  return 0;
+}}
+
+function routeStart(route, g, laneIndex=1) {{
   const dir = routeDirection(route);
   const node = routeTurnNode(route, g);
   const lane = laneCoordForDir(node, dir, g, laneIndex);
-  const pad = g.laneW * 2 + startOffset;
+  const pad = g.laneW * 9;
   switch(route) {{
     case 'W-E':  return {{x:g.mapLeft - pad,  y:lane.y}};
     case 'E-W':  return {{x:g.mapRight + pad, y:lane.y}};
@@ -1341,408 +1344,167 @@ function routeStart(route, g, startOffset=0, laneIndex=1) {{
 
 function laneEndForDir(node, dir, g, laneIndex=1) {{
   const lane = laneCoordForDir(node, dir, g, laneIndex);
-  if (dir.x > 0) return {{x:g.mapRight + g.laneW*2, y:lane.y}};
-  if (dir.x < 0) return {{x:g.mapLeft - g.laneW*2, y:lane.y}};
-  if (dir.y > 0) return {{x:lane.x, y:g.mapBottom + g.laneW*2}};
-  return {{x:lane.x, y:g.mapTop - g.laneW*2}};
+  const pad = g.laneW * 9;
+  if (dir.x > 0) return {{x:g.mapRight + pad, y:lane.y}};
+  if (dir.x < 0) return {{x:g.mapLeft - pad, y:lane.y}};
+  if (dir.y > 0) return {{x:lane.x, y:g.mapBottom + pad}};
+  return {{x:lane.x, y:g.mapTop - pad}};
 }}
 
-function dist(a,b) {{
-  return Math.hypot(b.x-a.x, b.y-a.y);
-}}
-
-function lineSegment(p0,p1,laneId) {{
-  return {{type:'line', p0, p1, laneId, len:Math.max(1, dist(p0,p1))}};
-}}
-
-function quadPoint(p0,p1,p2,t) {{
-  const u = 1-t;
-  return {{
-    x: u*u*p0.x + 2*u*t*p1.x + t*t*p2.x,
-    y: u*u*p0.y + 2*u*t*p1.y + t*t*p2.y,
-  }};
-}}
-
-function quadTangent(p0,p1,p2,t) {{
-  const x = 2*(1-t)*(p1.x-p0.x) + 2*t*(p2.x-p1.x);
-  const y = 2*(1-t)*(p1.y-p0.y) + 2*t*(p2.y-p1.y);
-  const mag = Math.hypot(x,y) || 1;
-  return {{x:x/mag, y:y/mag}};
-}}
-
-function estimateQuadLength(p0,p1,p2) {{
-  let len = 0, prev = p0;
-  for (let i=1; i<=12; i++) {{
-    const pt = quadPoint(p0,p1,p2,i/12);
-    len += dist(prev,pt);
-    prev = pt;
-  }}
-  return Math.max(1,len);
-}}
-
-function curveSegment(p0,p1,p2,laneId) {{
-  return {{type:'curve', p0, p1, p2, laneId, len:estimateQuadLength(p0,p1,p2)}};
-}}
-
-function segmentPoint(seg,t) {{
-  if (seg.type === 'curve') return quadPoint(seg.p0,seg.p1,seg.p2,t);
-  return {{x:seg.p0.x + (seg.p1.x-seg.p0.x)*t, y:seg.p0.y + (seg.p1.y-seg.p0.y)*t}};
-}}
-
-function segmentTangent(seg,t) {{
-  if (seg.type === 'curve') return quadTangent(seg.p0,seg.p1,seg.p2,t);
-  const dx = seg.p1.x-seg.p0.x, dy = seg.p1.y-seg.p0.y;
-  const mag = Math.hypot(dx,dy) || 1;
-  return {{x:dx/mag, y:dy/mag}};
-}}
-
-function gatePoint(node, dir, axis, g, laneIndex=1) {{
+function stopGatePoint(node, dir, g, laneIndex=1) {{
   const lane = laneCoordForDir(node, dir, g, laneIndex);
   const off = g.laneW * 3.0;
-  if (axis === 'ew') return {{x:node.x - Math.sign(dir.x)*off, y:lane.y}};
+  if (Math.abs(dir.x) > 0) return {{x:node.x - Math.sign(dir.x)*off, y:lane.y}};
   return {{x:lane.x, y:node.y - Math.sign(dir.y)*off}};
 }}
 
-function gateTOnLine(seg, pt) {{
-  if (seg.type !== 'line') return null;
-  const dx = seg.p1.x-seg.p0.x, dy = seg.p1.y-seg.p0.y;
-  const denom = dx*dx + dy*dy;
-  if (denom <= 0) return null;
-  const t = ((pt.x-seg.p0.x)*dx + (pt.y-seg.p0.y)*dy) / denom;
-  return t >= 0 && t <= 1 ? t : null;
+function addWaypoint(points, p) {{
+  const prev = points[points.length-1];
+  if (!prev || dist(prev, p) > 0.5) points.push(p);
 }}
 
-function addGate(gates, segments, segIdx, node, dir, axis, g, laneIndex=1, blockLaneId=null) {{
-  const pt = gatePoint(node, dir, axis, g, laneIndex);
-  const t = gateTOnLine(segments[segIdx], pt);
-  if (t === null) return;
-  gates.push({{segIdx, t, intKey:node.key, axis, node, blockLaneId}});
-}}
-
-function axisForDir(dir) {{
-  return Math.abs(dir.x) > 0 ? 'ew' : 'ns';
-}}
-
-function turnWaypoints(node, dir, outDir, g, inLaneIndex, outLaneIndex, maneuver) {{
-  const axis = axisForDir(dir);
-  const stopLine = gatePoint(node, dir, axis, g, inLaneIndex);
-  const entryLen = g.laneW * (maneuver === 'right' ? 1.35 : 2.05);
-  const exitLen = g.laneW * (maneuver === 'right' ? 1.35 : 2.05);
-  const approachPoint = {{
-    x: stopLine.x + dir.x * entryLen,
-    y: stopLine.y + dir.y * entryLen,
-  }};
-  const outLaneCoord = laneCoordForDir(node, outDir, g, outLaneIndex);
-  const exitLaneAlignmentPoint = {{
-    x: outLaneCoord.x + outDir.x * exitLen,
-    y: outLaneCoord.y + outDir.y * exitLen,
-  }};
-  const cornerPivotPoint = Math.abs(dir.x) > 0
-    ? {{x: exitLaneAlignmentPoint.x, y: approachPoint.y}}
-    : {{x: approachPoint.x, y: exitLaneAlignmentPoint.y}};
-  return {{
-    approachPoint,
-    stopLinePoint: stopLine,
-    cornerPivotPoint,
-    exitLaneAlignmentPoint,
-    exitPoint: laneEndForDir(node, outDir, g, outLaneIndex),
-  }};
-}}
-
-function buildVehiclePath(route, maneuver, g, startOffset=0, inboundLane=1, outboundLane=null) {{
-  const dir = routeDirection(route);
-  const node = routeTurnNode(route, g);
-  const axis = axisForDir(dir);
-  const inLaneIndex = inboundLane;
-  const outLaneIndex = outboundLane ?? outboundLaneForManeuver(maneuver, inLaneIndex);
-  const start = routeStart(route, g, startOffset, inLaneIndex);
-  const inLane = laneIdForDir(node.key, dir, inLaneIndex);
-  const gates = [];
+function buildPolyline(points) {{
   const segments = [];
-
-  if (maneuver === 'straight') {{
-    const endNode = {{key: node.key, x: node.x, y: node.y}};
-    const end = laneEndForDir(endNode, dir, g, inLaneIndex);
-    segments.push(lineSegment(start, end, inLane));
-
-    if (route === 'W-E') {{
-      addGate(gates, segments, 0, {{key:'A',x:g.axA,y:g.roadY}}, dir, 'ew', g, inLaneIndex, inLane);
-      addGate(gates, segments, 0, {{key:'B',x:g.axB,y:g.roadY}}, dir, 'ew', g, inLaneIndex, inLane);
-      addGate(gates, segments, 0, {{key:'C',x:g.axC,y:g.roadY}}, dir, 'ew', g, inLaneIndex, inLane);
-    }} else if (route === 'E-W') {{
-      addGate(gates, segments, 0, {{key:'C',x:g.axC,y:g.roadY}}, dir, 'ew', g, inLaneIndex, inLane);
-      addGate(gates, segments, 0, {{key:'B',x:g.axB,y:g.roadY}}, dir, 'ew', g, inLaneIndex, inLane);
-      addGate(gates, segments, 0, {{key:'A',x:g.axA,y:g.roadY}}, dir, 'ew', g, inLaneIndex, inLane);
-    }} else {{
-      addGate(gates, segments, 0, node, dir, axis, g, inLaneIndex, inLane);
-    }}
-    return {{segments, gates}};
+  let total = 0;
+  for (let i=0; i<points.length-1; i++) {{
+    const p0 = points[i], p1 = points[i+1];
+    const len = Math.max(1, dist(p0, p1));
+    const dx = (p1.x-p0.x) / len;
+    const dy = (p1.y-p0.y) / len;
+    segments.push({{p0, p1, len, start:total, end:total+len, dx, dy}});
+    total += len;
   }}
+  return {{points, segments, totalLength:total}};
+}}
 
-  const outDir = turnDirection(dir, maneuver);
-  const outLane = laneIdForDir(node.key, outDir, outLaneIndex);
-  const turn = turnWaypoints(node, dir, outDir, g, inLaneIndex, outLaneIndex, maneuver);
-
-  segments.push(lineSegment(start, turn.stopLinePoint, inLane));
-  if (route === 'W-E') {{
-    addGate(gates, segments, 0, {{key:'A',x:g.axA,y:g.roadY}}, dir, 'ew', g, inLaneIndex, inLane);
-    addGate(gates, segments, 0, node, dir, axis, g, inLaneIndex, outLane);
-  }} else if (route === 'E-W') {{
-    addGate(gates, segments, 0, {{key:'C',x:g.axC,y:g.roadY}}, dir, 'ew', g, inLaneIndex, inLane);
-    addGate(gates, segments, 0, node, dir, axis, g, inLaneIndex, outLane);
-  }} else {{
-    addGate(gates, segments, 0, node, dir, axis, g, inLaneIndex, outLane);
+function pointAtProgress(path, progress) {{
+  if (!path.segments.length) return {{x:0,y:0,dx:1,dy:0}};
+  if (progress <= 0) {{
+    const s = path.segments[0];
+    return {{x:s.p0.x, y:s.p0.y, dx:s.dx, dy:s.dy}};
   }}
-  segments.push(lineSegment(turn.stopLinePoint, turn.approachPoint, inLane));
-  segments.push(curveSegment(
-    turn.approachPoint,
-    turn.cornerPivotPoint,
-    turn.exitLaneAlignmentPoint,
-    `${{inLane}}>corner:${{maneuver}}:${{node.key}}`
-  ));
-  segments.push(lineSegment(turn.exitLaneAlignmentPoint, turn.exitPoint, outLane));
-  return {{segments, gates}};
-}}
-
-// ── SPACING HELPERS ───────────────────────────────────────────────────────────
-// Minimum following distance = vehicle length + safety buffer
-const MIN_FOLLOW_GAP = 25;   // px below which target speed = 0
-const DECEL_DIST     = 72;   // px — begin decelerating when gap < this
-
-// Each signalized junction admits one committed vehicle movement at a time.
-// This keeps the schematic animation readable without a heavyweight simulator.
-const intersectionLocks = {{
-  A: {{ occupiedBy:null, axis:null, route:null, maneuver:null }},
-  B: {{ occupiedBy:null, axis:null, route:null, maneuver:null }},
-  C: {{ occupiedBy:null, axis:null, route:null, maneuver:null }},
-}};
-
-/**
- * gapAhead: distance to nearest vehicle in the same lane/segment direction.
- * Lane IDs make car-following cheap while preventing same-lane overlap.
- */
-function gapAhead(v, allVehicles) {{
-  let minGap = Infinity;
-  const seg = v.currentSegment();
-  if (!seg) return minGap;
-  const tangent = segmentTangent(seg, v.segT);
-  for (const other of allVehicles) {{
-    if (other === v || other.done) continue;
-    if (other.currentLaneId() !== v.currentLaneId()) continue;
-
-    const dx = other.x - v.x;
-    const dy = other.y - v.y;
-    const ahead = dx * tangent.x + dy * tangent.y;
-    if (ahead <= 0) continue;
-
-    const lateral = Math.abs(dx * tangent.y - dy * tangent.x);
-    if (lateral > 18) continue;
-
-    const dist = Math.sqrt(dx*dx + dy*dy);
-    if (dist < minGap) minGap = dist;
+  if (progress >= path.totalLength) {{
+    const s = path.segments[path.segments.length-1];
+    return {{x:s.p1.x, y:s.p1.y, dx:s.dx, dy:s.dy}};
   }}
-  return minGap;
+  const seg = path.segments.find(s => progress >= s.start && progress <= s.end) || path.segments[path.segments.length-1];
+  const t = (progress - seg.start) / seg.len;
+  return {{
+    x: seg.p0.x + (seg.p1.x-seg.p0.x) * t,
+    y: seg.p0.y + (seg.p1.y-seg.p0.y) * t,
+    dx: seg.dx,
+    dy: seg.dy,
+  }};
 }}
 
-function lockForIntersection(key) {{
-  return intersectionLocks[key] || null;
+function smoothAngle(current, target, amount) {{
+  if (!Number.isFinite(current)) return target;
+  let delta = ((target - current + Math.PI) % (Math.PI * 2)) - Math.PI;
+  if (delta < -Math.PI) delta += Math.PI * 2;
+  return current + delta * amount;
 }}
 
-function vehicleHasIntersectionLock(v, key) {{
-  return Boolean(v.intersectionLocks && v.intersectionLocks.has(key));
-}}
-
-function acquireIntersectionLock(v, gate) {{
-  const lock = lockForIntersection(gate.intKey);
-  if (!lock) return true;
-  if (lock.occupiedBy !== null && lock.occupiedBy !== v.id) return false;
-  lock.occupiedBy = v.id;
-  lock.axis = gate.axis;
-  lock.route = v.route;
-  lock.maneuver = v.maneuver;
-  if (v.intersectionLocks) v.intersectionLocks.set(gate.intKey, gate);
-  return true;
-}}
-
-function releaseIntersectionLock(v, key) {{
-  const lock = lockForIntersection(key);
-  if (lock && lock.occupiedBy === v.id) {{
-    lock.occupiedBy = null;
-    lock.axis = null;
-    lock.route = null;
-    lock.maneuver = null;
-  }}
-  if (v.intersectionLocks) v.intersectionLocks.delete(key);
-}}
-
-function releaseAllIntersectionLocks(v) {{
-  if (!v.intersectionLocks) return;
-  Array.from(v.intersectionLocks.keys()).forEach(key => releaseIntersectionLock(v, key));
-}}
-
-function hasPassedGate(v, gate) {{
-  if (v.segIdx > gate.segIdx) return true;
-  if (v.segIdx < gate.segIdx) return false;
-  return v.segT >= gate.t;
-}}
-
-function releasePassedIntersectionLocks(v, g) {{
-  if (!v.intersectionLocks || v.intersectionLocks.size === 0) return;
-  const clearDistance = g.laneW * 3.45;
-  Array.from(v.intersectionLocks.entries()).forEach(([key, gate]) => {{
-    if (v.done) {{
-      releaseIntersectionLock(v, key);
-      return;
-    }}
-    const awayFromCenter = Math.hypot(v.x - gate.node.x, v.y - gate.node.y);
-    if (hasPassedGate(v, gate) && awayFromCenter > clearDistance) {{
-      releaseIntersectionLock(v, key);
-    }}
+function nearestProgressOnPath(path, x, y) {{
+  let best = {{progress:0, d:Infinity}};
+  path.segments.forEach(seg => {{
+    const vx = seg.p1.x - seg.p0.x;
+    const vy = seg.p1.y - seg.p0.y;
+    const denom = vx*vx + vy*vy;
+    const t = denom > 0 ? clampValue(((x-seg.p0.x)*vx + (y-seg.p0.y)*vy) / denom, 0, 1) : 0;
+    const px = seg.p0.x + vx*t;
+    const py = seg.p0.y + vy*t;
+    const d = Math.hypot(px-x, py-y);
+    if (d < best.d) best = {{progress:seg.start + seg.len*t, d}};
   }});
+  return best.progress;
 }}
 
-function nextUpcomingGate(v) {{
-  const seg = v.currentSegment();
-  if (!seg) return null;
-  let best = null;
-  for (const gate of v.gates) {{
-    if (gate.segIdx !== v.segIdx || gate.t <= v.segT) continue;
-    const distance = (gate.t - v.segT) * seg.len;
-    if (!best || distance < best.distance) best = {{ gate, distance }};
-  }}
-  return best;
+function progressAtPoint(path, point) {{
+  return nearestProgressOnPath(path, point.x, point.y);
 }}
 
-function conflictZoneOccupied(v, gate, g) {{
-  const radius = g.laneW * 2.45;
-  return vehicles.some(o => {{
-    if (o === v || o.done) return false;
-    return Math.abs(o.x - gate.node.x) < radius && Math.abs(o.y - gate.node.y) < radius;
-  }});
+function horizontalGateKeys(route, routeType) {{
+  if (route === 'W-E') return ['A','B','C'];
+  if (route === 'E-W') return ['C','B','A'];
+  return [];
 }}
 
-function exitLaneBlocked(v, gate, g) {{
-  if (!gate.blockLaneId) return false;
-  const clearDistance = g.laneW * 4.9;
-  return vehicles.some(o => {{
-    if (o === v || o.done) return false;
-    if (o.currentLaneId() !== gate.blockLaneId) return false;
-    return Math.hypot(o.x - gate.node.x, o.y - gate.node.y) < clearDistance;
-  }});
+function buildLanePath(route, routeType, g, inboundLane=1, outboundLane=null) {{
+  routeType = 'straight';
+  const dir = routeDirection(route);
+  const axis = axisForDir(dir);
+  const node = routeTurnNode(route, g);
+  const points = [];
+  const start = routeStart(route, g, inboundLane);
+  addWaypoint(points, start);
+  addWaypoint(points, laneEndForDir(node, dir, g, inboundLane));
+
+  const path = buildPolyline(points);
+  const gateKeys = horizontalGateKeys(route, routeType);
+  if (gateKeys.length === 0) gateKeys.push(node.key);
+  const gates = gateKeys.map(key => {{
+    const gateNode = nodeForKey(key, g);
+    const point = stopGatePoint(gateNode, dir, g, inboundLane);
+    return {{
+      intKey: key,
+      axis,
+      point,
+      distance: progressAtPoint(path, point),
+    }};
+  }}).sort((a,b) => a.distance - b.distance);
+
+  return {{
+    points,
+    segments: path.segments,
+    totalLength: path.totalLength,
+    gates,
+    approachLaneKey: approachLaneId(route, inboundLane),
+    pathLaneKey: approachLaneId(route, inboundLane),
+    divergeDistance: Infinity,
+  }};
 }}
 
-/**
- * Vehicles stop at red signal gates and also avoid entering an occupied
- * intersection box.
- */
-function intersectionBlocked(v, gate, g) {{
-  const lock = lockForIntersection(gate.intKey);
-  const lockedByOther = lock && lock.occupiedBy !== null && lock.occupiedBy !== v.id;
-  return lockedByOther || conflictZoneOccupied(v, gate, g) || exitLaneBlocked(v, gate, g);
-}}
-
-function reserveUpcomingIntersection(v, g) {{
-  const upcoming = nextUpcomingGate(v);
-  if (!upcoming) return;
-  const {{ gate, distance }} = upcoming;
-  if (vehicleHasIntersectionLock(v, gate.intKey)) return;
-  if (distance > Math.max(18, g.laneW * 0.95)) return;
-  if (!tlAllowsEntry(TL[gate.intKey], gate.axis)) return;
-  if (intersectionBlocked(v, gate, g)) return;
-  acquireIntersectionLock(v, gate);
-}}
-
-function distToStopLine(v, g) {{
-  const seg = v.currentSegment();
-  if (!seg) return Infinity;
-  let minStop = Infinity;
+// Traffic light permission is deliberately one line: green moves; yellow/red
+// stops vehicles that have not crossed the stop gate yet.
+function distanceToSignalStop(v, g) {{
+  const buffer = Math.max(SIGNAL_STOP_BUFFER, g.laneW * 0.55);
+  let nearest = Infinity;
   v.currentGate = null;
   for (const gate of v.gates) {{
-    if (gate.segIdx !== v.segIdx || gate.t <= v.segT) continue;
-    const distToGate = (gate.t - v.segT) * seg.len;
-    const entered = hasPassedGate(v, gate);
-    let hasLock = vehicleHasIntersectionLock(v, gate.intKey);
-    const green = tlAllowsEntry(TL[gate.intKey], gate.axis);
-    if (!green && hasLock && !entered) {{
-      releaseIntersectionLock(v, gate.intKey);
-      hasLock = false;
-    }}
-    const stopForSignal = !green && !entered;
-    const blocked = !hasLock && intersectionBlocked(v, gate, g);
-    if ((stopForSignal || blocked) && distToGate < minStop) {{
-      minStop = distToGate;
+    const stopAt = gate.distance - buffer;
+    if (v.progress > gate.distance + g.laneW * 0.25) continue;
+    if (tlAllowsEntry(TL[gate.intKey], gate.axis)) continue;
+    const d = stopAt - v.progress;
+    if (d < nearest) {{
+      nearest = Math.max(0, d);
       v.currentGate = gate;
     }}
   }}
-
-  // ACCIDENT: blockage acts as permanent stop line in W-E lane.
-  if (MODE==='ACCIDENT' && v.route === 'W-E' && v.currentLaneId().startsWith('H:E')) {{
-    const accX = g.axB - g.rbR * 2.3;
-    if (v.x < accX) minStop = Math.min(minStop, Math.max(0, accX - v.x - g.laneW*0.5));
-  }}
-  return minStop;
+  return nearest;
 }}
 
-/**
- * targetSpeed: desired speed based on gap to leader and distance to stop line.
- * Returns a value in [0 .. baseSpd].
- */
-function targetSpeed(v, g, allVehicles) {{
-  // Nearest hard constraint (stop line, occupied intersection, or gap)
-  const gap  = gapAhead(v, allVehicles);
-  const stop = distToStopLine(v, g);
-  const dist = Math.min(gap - v.vw, stop);  // subtract own length from gap
-
-  if (dist <= 2)           return 0;
-  if (dist < MIN_FOLLOW_GAP) return 0;
-  if (dist < DECEL_DIST)   return v.baseSpd * ((dist - MIN_FOLLOW_GAP) / (DECEL_DIST - MIN_FOLLOW_GAP));
-  return v.baseSpd;
+// Same-lane spacing: only vehicles with the same route/lane key affect each
+// other. Different lanes move independently for this visual demo.
+function gapAhead(v) {{
+  let best = Infinity;
+  vehicles.forEach(other => {{
+    if (other === v || other.done) return;
+    if (other.currentLaneId() !== v.currentLaneId()) return;
+    const gap = other.progress - v.progress;
+    if (gap > 0 && gap < best) best = gap;
+  }});
+  return best;
 }}
 
-// ── ROUNDABOUT ENTRY GATE ─────────────────────────────────────────────────────
-// Prevents vehicles from entering when another vehicle is too close to the
-// entry point on the orbit. Returns true if entry is safe.
-const MIN_ENTRY_GAP_RAD = 0.75;  // radians (~43°) — gap needed before entry
-
-function canEnterRoundabout(v) {{
-  const rbVehicles = vehicles.filter(o => o !== v && o.phase === 'roundabout');
-  if (rbVehicles.length === 0) return true;
-
-  const entryAng = v.route === 'W-E' ? Math.PI : 0;
-  const TWO_PI   = Math.PI * 2;
-  const norm = a => ((a % TWO_PI) + TWO_PI) % TWO_PI;
-
-  for (const rv of rbVehicles) {{
-    const myN    = norm(entryAng);
-    const otherN = norm(rv.rbAngle);
-    let diff     = Math.abs(myN - otherN);
-    if (diff > Math.PI) diff = TWO_PI - diff;
-    if (diff < MIN_ENTRY_GAP_RAD) return false;
-  }}
-  return true;
-}}
-
-/**
- * rbGapAhead: angular gap (radians) to the nearest vehicle clockwise ahead
- * in the roundabout. Used to slow down orbiting vehicles that are catching up.
- */
-function rbGapAhead(v) {{
-  const TWO_PI = Math.PI * 2;
-  const norm = a => ((a % TWO_PI) + TWO_PI) % TWO_PI;
-  let minGap = Infinity;
-  const myN = norm(v.rbAngle);
-
-  for (const other of vehicles) {{
-    if (other === v || other.phase !== 'roundabout') continue;
-    const otherN = norm(other.rbAngle);
-    // Angular gap clockwise ahead: how far is `other` ahead of `v`?
-    // Since angle increases = clockwise, "ahead" means otherN > myN (mod 2π)
-    let gap = otherN - myN;
-    if (gap < 0) gap += TWO_PI;
-    // Only consider vehicles within half the circle ahead
-    if (gap < Math.PI && gap < minGap) minGap = gap;
-  }}
-  return minGap;
+function desiredVehicleSpeed(v, g) {{
+  const signalDist = distanceToSignalStop(v, g);
+  const spacingDist = gapAhead(v) - MIN_LANE_GAP;
+  const clearDist = Math.min(signalDist, spacingDist);
+  let cap = v.baseSpd;
+  if (!v.isEmergency && MODE === 'EMERGENCY') cap *= 0.65;
+  if (clearDist <= 0) return 0;
+  if (clearDist < SLOWDOWN_DISTANCE) return cap * (clearDist / SLOWDOWN_DISTANCE);
+  return cap;
 }}
 
 function vehicleVisualState(v) {{
@@ -1766,9 +1528,10 @@ class Vehicle {{
   constructor(routeDef, typeDef, g, startOffset=0) {{
     this.id           = vehicleIdCounter++;
     this.route        = routeDef.id;
-    this.maneuver     = routeDef.maneuver || pickManeuver(typeDef.type === 'emergency');
-    this.laneIndex    = routeDef.laneIndex || laneForManeuver(this.maneuver, typeDef.type === 'emergency');
-    this.outLaneIndex = routeDef.outLaneIndex || outboundLaneForManeuver(this.maneuver, this.laneIndex);
+    this.routeType    = 'straight';
+    this.maneuver     = this.routeType;
+    this.laneIndex    = routeDef.laneIndex || laneForRouteType(this.routeType, typeDef.type === 'emergency');
+    this.outLaneIndex = routeDef.outLaneIndex || outboundLaneForRouteType(this.routeType, this.laneIndex);
     this.type         = typeDef.type;
     this.color        = typeDef.color;
     this.vw           = typeDef.w;
@@ -1780,101 +1543,63 @@ class Vehicle {{
     this.flashTimer   = 0;
     this.isEmergency  = (this.type === 'emergency');
     this.startOffset  = startOffset;  // initial position offset along route
-    this.segments     = [];
+    this.path         = null;
     this.gates        = [];
-    this.segIdx       = 0;
-    this.segT         = 0;
+    this.progress     = startOffset;
     this.angle        = 0;
     this.currentGate  = null;
-    this.intersectionLocks = new Map();
+    this.approachLaneKey = '';
+    this.pathLaneKey = '';
+    this.divergeDistance = Infinity;
     this._initPath(g);
   }}
 
-  _initPath(g) {{
-    releaseAllIntersectionLocks(this);
-    const path = buildVehiclePath(this.route, this.maneuver, g, this.startOffset, this.laneIndex, this.outLaneIndex);
-    this.segments = path.segments;
+  _initPath(g, keepProgress=false) {{
+    const oldRatio = this.path?.totalLength ? this.progress / this.path.totalLength : null;
+    const path = buildLanePath(this.route, this.routeType, g, this.laneIndex, this.outLaneIndex);
+    this.path = path;
     this.gates = path.gates;
-    this.segIdx = 0;
-    this.segT = 0;
-    this.done = this.segments.length === 0;
+    this.approachLaneKey = path.approachLaneKey;
+    this.pathLaneKey = path.pathLaneKey;
+    this.divergeDistance = path.divergeDistance;
+    this.progress = keepProgress && oldRatio !== null
+      ? clampValue(oldRatio * path.totalLength, 0, path.totalLength)
+      : Math.min(this.startOffset, Math.max(0, path.totalLength - 1));
+    this.done = path.segments.length === 0;
     this._applySegmentPosition();
   }}
 
   resetPath() {{
     const g = geo();
-    this._initPath(g);
-  }}
-
-  currentSegment() {{
-    return this.segments[this.segIdx] || null;
+    this._initPath(g, true);
   }}
 
   currentLaneId() {{
-    const seg = this.currentSegment();
-    return seg ? seg.laneId : '';
+    return this.progress <= this.divergeDistance ? this.approachLaneKey : this.pathLaneKey;
   }}
 
-  _applySegmentPosition() {{
-    const seg = this.currentSegment();
-    if (!seg) {{ this.done = true; return; }}
-    const p = segmentPoint(seg, this.segT);
-    const t = segmentTangent(seg, this.segT);
+  _applySegmentPosition(smooth=false) {{
+    if (!this.path || !this.path.segments.length) {{ this.done = true; return; }}
+    const p = pointAtProgress(this.path, this.progress);
+    const nextAngle = Math.atan2(p.dy, p.dx);
     this.x = p.x; this.y = p.y;
-    this.dx = t.x; this.dy = t.y;
-    this.angle = Math.atan2(t.y, t.x);
-  }}
-
-  _advanceBy(distance) {{
-    let remaining = distance;
-    while (remaining > 0 && !this.done) {{
-      const seg = this.currentSegment();
-      if (!seg) {{ this.done = true; releaseAllIntersectionLocks(this); break; }}
-      const segRemaining = (1 - this.segT) * seg.len;
-      if (remaining < segRemaining) {{
-        this.segT += remaining / seg.len;
-        remaining = 0;
-      }} else {{
-        remaining -= segRemaining;
-        this.segIdx += 1;
-        this.segT = 0;
-        if (this.segIdx >= this.segments.length) {{
-          this.done = true;
-          releaseAllIntersectionLocks(this);
-          break;
-        }}
-      }}
-    }}
-    if (!this.done) this._applySegmentPosition();
+    this.dx = p.dx; this.dy = p.dy;
+    this.angle = smooth ? smoothAngle(this.angle, nextAngle, 0.34) : nextAngle;
   }}
 
   setRoutePosition(x,y) {{
-    let best = {{idx:0, t:0, d:Infinity}};
-    this.segments.forEach((seg, idx) => {{
-      if (seg.type !== 'line') return;
-      const dx = seg.p1.x-seg.p0.x, dy = seg.p1.y-seg.p0.y;
-      const denom = dx*dx + dy*dy;
-      if (denom <= 0) return;
-      const t = Math.max(0, Math.min(1, ((x-seg.p0.x)*dx + (y-seg.p0.y)*dy) / denom));
-      const p = segmentPoint(seg,t);
-      const d = Math.hypot(p.x-x,p.y-y);
-      if (d < best.d) best = {{idx,t,d}};
-    }});
-    this.segIdx = best.idx;
-    this.segT = best.t;
-    this._applySegmentPosition();
+    if (!this.path) return;
+    this.progress = nearestProgressOnPath(this.path, x, y);
+    this._applySegmentPosition(true);
   }}
 
-  // ── update ────────────────────────────────────────────────────────────────
+  // Waypoint movement: accelerate toward the current desired speed, then
+  // advance one scalar progress value along the lane polyline.
   update(dt, g) {{
     if (this.done) return;
     this.flashTimer += dt;
-    releasePassedIntersectionLocks(this, g);
-    reserveUpcomingIntersection(this, g);
 
-    // ── Straight-line travel ──────────────────────────────────────────────
-    // Smooth car-following speed control
-    const tSpd = targetSpeed(this, g, vehicles);
+    const tSpd = desiredVehicleSpeed(this, g);
     const ACCEL = 2.8, DECEL = 6.0;
     if (tSpd < this.spd) {{
       this.spd = Math.max(tSpd, this.spd - dt * DECEL);
@@ -1882,24 +1607,12 @@ class Vehicle {{
       this.spd = Math.min(tSpd, this.spd + dt * ACCEL);
     }}
 
-    // Emergency: yield to ambulance — all traffic slows; same-lane vehicles
-    // directly ahead of the ambulance stop completely to clear the path.
-    if (!this.isEmergency && MODE==='EMERGENCY') {{
-      const amb = vehicles.find(v => v.isEmergency && !v.done);
-      if (amb) {{
-        this.spd = Math.min(this.spd, this.baseSpd * 0.28);
-        // Same route + travel phase + vehicle is ahead of ambulance → full stop
-        if (this.route === amb.route &&
-            this.phase === 'travel' && amb.phase === 'travel') {{
-          const ahead = (amb.dx > 0 && this.x > amb.x) ||
-                        (amb.dx < 0 && this.x < amb.x);
-          if (ahead && Math.abs(this.x - amb.x) < 240) this.spd = 0;
-        }}
-      }}
+    this.progress += this.spd * 60 * dt;
+    if (this.progress >= this.path.totalLength + 4) {{
+      this.done = true;
+      return;
     }}
-
-    this._advanceBy(this.spd * 60 * dt);
-    releasePassedIntersectionLocks(this, g);
+    this._applySegmentPosition();
   }}
 
   // ── draw ──────────────────────────────────────────────────────────────────
@@ -1971,20 +1684,19 @@ function spawnBlocked(routeDef, g) {{
   const CLEAR = 28;
   const rid = typeof routeDef === 'string' ? routeDef : routeDef.id;
   const laneIndex = typeof routeDef === 'string' ? 1 : (routeDef.laneIndex || 1);
-  const start = routeStart(rid, g, 0, laneIndex);
-  const sx = start.x, sy = start.y;
-  const spawnLane = laneIdForDir(routeTurnNode(rid, g).key, routeDirection(rid), laneIndex);
-  return vehicles.some(v => !v.done && v.currentLaneId() === spawnLane && Math.hypot(v.x-sx, v.y-sy) < CLEAR);
+  const spawnLane = approachLaneId(rid, laneIndex);
+  return vehicles.some(v => !v.done && v.approachLaneKey === spawnLane && v.progress < CLEAR);
 }}
 
-function makeRouteDef(routeId, typeDef, preferredManeuver=null, preferredLane=null) {{
-  const maneuver = preferredManeuver || pickManeuver(typeDef.type === 'emergency');
-  const laneIndex = preferredLane || laneForManeuver(maneuver, typeDef.type === 'emergency');
+function makeRouteDef(routeId, typeDef, preferredRouteType=null, preferredLane=null) {{
+  const routeType = 'straight';
+  const laneIndex = preferredLane || laneForRouteType(routeType, typeDef.type === 'emergency');
   return {{
     id: routeId,
-    maneuver,
+    routeType,
+    maneuver: routeType,
     laneIndex,
-    outLaneIndex: outboundLaneForManeuver(maneuver, laneIndex),
+    outLaneIndex: outboundLaneForRouteType(routeType, laneIndex),
   }};
 }}
 
@@ -2068,12 +1780,19 @@ function drawRoad(x1,y1,x2,y2,laneW,color='#1a1a2e',edge='rgba(226,232,240,0.12)
   ctx.restore();
 }}
 
-function drawDash(x1,y1,x2,y2,color='rgba(226,232,240,0.28)',width=1.7,dash=[14,12]) {{
+function laneLineOpacity(color) {{
+  const match = String(color).match(/rgba\([^,]+,[^,]+,[^,]+,\s*([0-9.]+)\)/i);
+  const alpha = match ? parseFloat(match[1]) : 1;
+  return Number.isFinite(alpha) ? Math.min(1, Math.max(0, alpha)) : 1;
+}}
+
+function drawLaneLine(x1,y1,x2,y2,color='rgba(226,232,240,0.28)',width=1.7) {{
   ctx.save();
-  ctx.setLineDash(dash);
-  ctx.strokeStyle = color;
+  ctx.setLineDash([]);
+  ctx.globalAlpha = laneLineOpacity(color);
+  ctx.strokeStyle = '#ffffff';
   ctx.lineWidth = width;
-  ctx.lineCap = 'round';
+  ctx.lineCap = 'butt';
   ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
   ctx.restore();
 }}
@@ -2106,15 +1825,6 @@ function drawTLDot(x,y,color) {{
   ctx.restore();
 }}
 
-function drawArrow(x,y,angle,color,len=16) {{
-  ctx.save(); ctx.translate(x,y); ctx.rotate(angle);
-  ctx.strokeStyle=color; ctx.lineWidth=2;
-  ctx.beginPath();
-  ctx.moveTo(-len/2,0); ctx.lineTo(len/2,0);
-  ctx.moveTo(len/2-5,-4); ctx.lineTo(len/2,0); ctx.lineTo(len/2-5,4);
-  ctx.stroke(); ctx.restore();
-}}
-
 function drawStopLine(x1,y1,x2,y2,width=3) {{
   ctx.save();
   ctx.setLineDash([]);
@@ -2125,60 +1835,6 @@ function drawStopLine(x1,y1,x2,y2,width=3) {{
   ctx.moveTo(x1,y1);
   ctx.lineTo(x2,y2);
   ctx.stroke();
-  ctx.restore();
-}}
-
-function drawStraightArrow(x,y,rotation,scale) {{
-  const len = scale;
-  const head = len * 0.22;
-  ctx.save();
-  ctx.translate(x,y);
-  ctx.rotate(rotation);
-  ctx.globalAlpha = 0.76;
-  ctx.strokeStyle='rgba(248,250,252,0.92)';
-  ctx.fillStyle='rgba(248,250,252,0.92)';
-  ctx.lineWidth=Math.max(2.4, len * 0.09);
-  ctx.lineCap='round';
-  ctx.lineJoin='round';
-  ctx.beginPath();
-  ctx.moveTo(-len*0.45, 0);
-  ctx.lineTo(len*0.28, 0);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(len*0.44, 0);
-  ctx.lineTo(len*0.22, -head);
-  ctx.lineTo(len*0.22, head);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
-}}
-
-function drawTurnArrow(x,y,rotation,direction='right',scale) {{
-  const len = scale;
-  const sign = direction === 'left' ? -1 : 1;
-  const head = len * 0.18;
-  const tipY = sign * len * 0.42;
-  ctx.save();
-  ctx.translate(x,y);
-  ctx.rotate(rotation);
-  ctx.globalAlpha = 0.76;
-  ctx.strokeStyle='rgba(248,250,252,0.92)';
-  ctx.fillStyle='rgba(248,250,252,0.92)';
-  ctx.lineWidth=Math.max(2.4, len * 0.09);
-  ctx.lineCap='round';
-  ctx.lineJoin='round';
-  ctx.beginPath();
-  ctx.moveTo(-len*0.45, 0);
-  ctx.lineTo(-len*0.12, 0);
-  ctx.quadraticCurveTo(len*0.10, 0, len*0.10, sign*len*0.22);
-  ctx.lineTo(len*0.10, tipY - sign*head*0.55);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(len*0.10, tipY);
-  ctx.lineTo(len*0.10 - head, tipY - sign*head);
-  ctx.lineTo(len*0.10 + head, tipY - sign*head);
-  ctx.closePath();
-  ctx.fill();
   ctx.restore();
 }}
 
@@ -2257,84 +1913,71 @@ function drawAccidentScene(g) {{
   ctx.fillText('BLOCKED', bx, by - laneW*1.5);
 }}
 
-function drawIntersectionB(g) {{
-  const {{ laneW, axB, roadY }} = g;
+function drawVerticalIntersectionCorridor(x, g) {{
+  const {{ laneW }} = g;
   const ext = mapExtent(g);
-  const half = laneW * 2.55;
 
-  // North-south road through B, kept darker than the main boulevard.
-  drawRoad(axB, ext.top, axB, ext.bottom, laneW, '#151b2a', 'rgba(226,232,240,0.11)', 'rgba(86,207,178,0.06)');
+  drawRoad(x, ext.top, x, ext.bottom, laneW, '#151b2a', 'rgba(226,232,240,0.11)');
   ctx.strokeStyle='rgba(226,232,240,0.13)'; ctx.lineWidth=1.5;
-  ctx.beginPath();ctx.moveTo(axB-laneW*2,ext.top);ctx.lineTo(axB-laneW*2,ext.bottom);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(axB+laneW*2,ext.top);ctx.lineTo(axB+laneW*2,ext.bottom);ctx.stroke();
-  drawDash(axB, ext.top, axB, ext.bottom, 'rgba(226,232,240,0.20)', 1.45, [12,12]);
-  drawDash(axB-laneW, ext.top, axB-laneW, ext.bottom, 'rgba(226,232,240,0.12)', 1.15, [9,14]);
-  drawDash(axB+laneW, ext.top, axB+laneW, ext.bottom, 'rgba(226,232,240,0.12)', 1.15, [9,14]);
-
-  // Open square crossing box where the two roads meet.
-  ctx.fillStyle='#252c3d';
-  ctx.fillRect(axB-half, roadY-half, half*2, half*2);
-  ctx.strokeStyle='rgba(226,232,240,0.20)';
-  ctx.lineWidth=1.4;
-  ctx.strokeRect(axB-half, roadY-half, half*2, half*2);
-
-  // Lane markings continue straight through the crossing.
-  drawDash(axB-half, roadY, axB+half, roadY, 'rgba(248,250,252,0.32)', 1.8, [10,9]);
-  drawDash(axB, roadY-half, axB, roadY+half, 'rgba(248,250,252,0.24)', 1.6, [9,9]);
-  drawDash(axB-half, roadY-laneW, axB+half, roadY-laneW, 'rgba(226,232,240,0.13)', 1.1, [8,10]);
-  drawDash(axB-half, roadY+laneW, axB+half, roadY+laneW, 'rgba(226,232,240,0.13)', 1.1, [8,10]);
-
-  // Stop bars give B a classic signalized-intersection read.
-  ctx.setLineDash([]);
-  ctx.strokeStyle='rgba(248,250,252,0.36)';
-  ctx.lineWidth=2;
-  ctx.beginPath();ctx.moveTo(axB-half-laneW*0.5, roadY-laneW*2);ctx.lineTo(axB-half-laneW*0.5, roadY+laneW*2);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(axB+half+laneW*0.5, roadY-laneW*2);ctx.lineTo(axB+half+laneW*0.5, roadY+laneW*2);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(axB-laneW*2, roadY-half-laneW*0.5);ctx.lineTo(axB+laneW*2, roadY-half-laneW*0.5);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(axB-laneW*2, roadY+half+laneW*0.5);ctx.lineTo(axB+laneW*2, roadY+half+laneW*0.5);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x-laneW*2,ext.top);ctx.lineTo(x-laneW*2,ext.bottom);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x+laneW*2,ext.top);ctx.lineTo(x+laneW*2,ext.bottom);ctx.stroke();
+  drawLaneLine(x, ext.top, x, ext.bottom,'rgba(226,232,240,0.20)',1.45);
+  drawLaneLine(x-laneW, ext.top, x-laneW, ext.bottom,'rgba(226,232,240,0.12)',1.15);
+  drawLaneLine(x+laneW, ext.top, x+laneW, ext.bottom,'rgba(226,232,240,0.12)',1.15);
 }}
 
-function drawIntersectionBLabel(g) {{
-  const {{ laneW, axB, roadY }} = g;
-  const box = laneW * 1.55;
-  ctx.fillStyle='rgba(2,6,23,0.50)';
-  ctx.fillRect(axB-box/2, roadY-box/2, box, box);
-  ctx.strokeStyle='rgba(86,207,178,0.44)';
+function drawIntersectionPad(x, y, laneW, label, labelColor) {{
+  ctx.fillStyle='#202739';
+  ctx.fillRect(x-laneW*2.2, y-laneW*2.2, laneW*4.4, laneW*4.4);
+  ctx.strokeStyle='rgba(226,232,240,0.16)';
   ctx.lineWidth=1.2;
-  ctx.strokeRect(axB-box/2, roadY-box/2, box, box);
-  ctx.font=`bold ${{Math.floor(laneW*0.9)}}px Arial`;
-  ctx.fillStyle='#56cfb2';
+  ctx.strokeRect(x-laneW*2.2, y-laneW*2.2, laneW*4.4, laneW*4.4);
+  ctx.font=`bold ${{Math.floor(laneW*0.85)}}px Arial`;
+  ctx.fillStyle=labelColor;
   ctx.textAlign='center';
   ctx.textBaseline='middle';
-  ctx.fillText('B', axB, roadY);
+  ctx.fillText(label, x, y);
 }}
 
-function drawIntersectionAStopMarkings(g) {{
-  const {{ laneW, axA, roadY }} = g;
+function intersectionStopGeometry(x, y, laneW) {{
   const boxHalf = laneW * 2.2;
   const stopOffset = boxHalf + laneW * 0.55;
   const stopWidth = Math.max(2.4, laneW * 0.13);
-  const arrowScale = laneW * 1.12;
-  const westStopX = axA - stopOffset;
-  const northStopY = roadY - stopOffset;
-  const arrowTipClearance = Math.max(5, Math.min(15, laneW * 0.32));
-  const arrowForwardReach = arrowScale * 0.44;
-  const westArrowX = westStopX - arrowForwardReach - arrowTipClearance;
-  const northArrowY = northStopY - arrowForwardReach - arrowTipClearance;
-  const westThroughLaneY = roadY + laneW * 0.50;
-  const westTurnLaneY = roadY + laneW * 1.50;
-  const northThroughLaneX = axA - laneW * 0.50;
-  const northTurnLaneX = axA - laneW * 1.50;
+  return {{
+    stopWidth,
+    westStopX: x - stopOffset,
+    eastStopX: x + stopOffset,
+    northStopY: y - stopOffset,
+    southStopY: y + stopOffset,
+  }};
+}}
 
-  // Proper stop bars only cover the two incoming lanes.
-  drawStopLine(westStopX, roadY + laneW*0.18, westStopX, roadY + laneW*1.88, stopWidth);
-  drawStopLine(axA - laneW*1.88, northStopY, axA - laneW*0.18, northStopY, stopWidth);
+function drawFourWayStopBars(x, y, laneW) {{
+  const s = intersectionStopGeometry(x, y, laneW);
 
-  // Direction arrows are placed upstream of the stop lines on the asphalt lanes.
-  drawStraightArrow(westArrowX, westThroughLaneY, 0, arrowScale);
-  drawTurnArrow(westArrowX, westTurnLaneY, 0, 'right', arrowScale);
-  drawStraightArrow(northThroughLaneX, northArrowY, Math.PI/2, arrowScale);
-  drawTurnArrow(northTurnLaneX, northArrowY, Math.PI/2, 'right', arrowScale);
+  drawStopLine(x - laneW*1.88, s.northStopY, x - laneW*0.18, s.northStopY, s.stopWidth);
+  drawStopLine(s.eastStopX, y - laneW*1.88, s.eastStopX, y - laneW*0.18, s.stopWidth);
+  drawStopLine(s.westStopX, y + laneW*0.18, s.westStopX, y + laneW*1.88, s.stopWidth);
+  drawStopLine(x + laneW*0.18, s.southStopY, x + laneW*1.88, s.southStopY, s.stopWidth);
+}}
+
+function drawSquareIntersection(x, y, laneW, label, labelColor='#f97316') {{
+  drawIntersectionPad(x, y, laneW, label, labelColor);
+  drawFourWayStopBars(x, y, laneW);
+}}
+
+function drawIntersectionTrafficLights(x, y, laneW, tl) {{
+  const s = intersectionStopGeometry(x, y, laneW);
+  const laneGroupCenter = laneW;
+  const setback = Math.max(laneW * 0.95, 15);
+
+  // One signal per incoming two-lane group, placed upstream of the stop bar.
+  [
+    {{ x:s.westStopX - setback, y:y + laneGroupCenter, axis:'ew' }},
+    {{ x:s.eastStopX + setback, y:y - laneGroupCenter, axis:'ew' }},
+    {{ x:x - laneGroupCenter, y:s.northStopY - setback, axis:'ns' }},
+    {{ x:x + laneGroupCenter, y:s.southStopY + setback, axis:'ns' }},
+  ].forEach(light => drawTLDot(light.x, light.y, tlColor(tl, light.axis)));
 }}
 
 // ── Scene draw ────────────────────────────────────────────────────────────────
@@ -2375,63 +2018,32 @@ function drawScene() {{
   ctx.strokeStyle='rgba(226,232,240,0.24)'; ctx.lineWidth=2.3;
   ctx.beginPath();ctx.moveTo(ext.left,roadY-laneW*2);ctx.lineTo(ext.right,roadY-laneW*2);ctx.stroke();
   ctx.beginPath();ctx.moveTo(ext.left,roadY+laneW*2);ctx.lineTo(ext.right,roadY+laneW*2);ctx.stroke();
-  drawDash(ext.left,roadY,ext.right,roadY,'rgba(248,250,252,0.38)',2.2,[18,12]);
-  drawDash(ext.left,roadY-laneW,ext.right,roadY-laneW,'rgba(226,232,240,0.16)',1.25,[10,13]);
-  drawDash(ext.left,roadY+laneW,ext.right,roadY+laneW,'rgba(226,232,240,0.16)',1.25,[10,13]);
+  drawLaneLine(ext.left,roadY,ext.right,roadY,'rgba(248,250,252,0.38)',2.2);
+  drawLaneLine(ext.left,roadY-laneW,ext.right,roadY-laneW,'rgba(226,232,240,0.16)',1.25);
+  drawLaneLine(ext.left,roadY+laneW,ext.right,roadY+laneW,'rgba(226,232,240,0.16)',1.25);
 
-  // Vertical road — int_A continuous north/south corridor
-  drawRoad(axA, ext.top, axA, ext.bottom, laneW, '#151b2a', 'rgba(226,232,240,0.11)');
-  ctx.strokeStyle='rgba(226,232,240,0.13)'; ctx.lineWidth=1.5;
-  ctx.beginPath();ctx.moveTo(axA-laneW*2,ext.top);ctx.lineTo(axA-laneW*2,ext.bottom);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(axA+laneW*2,ext.top);ctx.lineTo(axA+laneW*2,ext.bottom);ctx.stroke();
-  drawDash(axA, ext.top, axA, ext.bottom,'rgba(226,232,240,0.20)',1.45,[12,12]);
-  drawDash(axA-laneW, ext.top, axA-laneW, ext.bottom,'rgba(226,232,240,0.12)',1.15,[9,14]);
-  drawDash(axA+laneW, ext.top, axA+laneW, ext.bottom,'rgba(226,232,240,0.12)',1.15,[9,14]);
-
-  // Vertical road — int_C continuous north/south corridor
-  drawRoad(axC, ext.top, axC, ext.bottom, laneW, '#151b2a', 'rgba(226,232,240,0.11)');
-  ctx.strokeStyle='rgba(226,232,240,0.13)'; ctx.lineWidth=1.5;
-  ctx.beginPath();ctx.moveTo(axC-laneW*2,ext.top);ctx.lineTo(axC-laneW*2,ext.bottom);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(axC+laneW*2,ext.top);ctx.lineTo(axC+laneW*2,ext.bottom);ctx.stroke();
-  drawDash(axC, ext.top, axC, ext.bottom,'rgba(226,232,240,0.20)',1.45,[12,12]);
-  drawDash(axC-laneW, ext.top, axC-laneW, ext.bottom,'rgba(226,232,240,0.12)',1.15,[9,14]);
-  drawDash(axC+laneW, ext.top, axC+laneW, ext.bottom,'rgba(226,232,240,0.12)',1.15,[9,14]);
-
-  drawIntersectionB(g);
+  // Vertical roads share the same clean four-way corridor rendering.
+  drawVerticalIntersectionCorridor(axA, g);
+  drawVerticalIntersectionCorridor(axB, g);
+  drawVerticalIntersectionCorridor(axC, g);
 
   // Active signal phase ribbons
   const [axisA, phaseColorA] = phaseVisual(TL.A);
   const [axisB, phaseColorB] = phaseVisual(TL.B);
   const [axisC, phaseColorC] = phaseVisual(TL.C);
   drawActivePhase(axA, roadY, axisA, laneW, laneW*3.7, phaseColorA);
-  drawActivePhase(axB, roadY, axisB, laneW, laneW*4.25, phaseColorB);
+  drawActivePhase(axB, roadY, axisB, laneW, laneW*3.7, phaseColorB);
   drawActivePhase(axC, roadY, axisC, laneW, laneW*3.7, phaseColorC);
-  drawIntersectionBLabel(g);
 
-  // Intersection pads A and C
-  [[axA,roadY,'#7b8cde','A'],[axC,roadY,'#f97316','C']].forEach(([ix,iy,ic,il]) => {{
-    ctx.fillStyle='#202739';
-    ctx.fillRect(ix-laneW*2.2, iy-laneW*2.2, laneW*4.4, laneW*4.4);
-    ctx.strokeStyle='rgba(226,232,240,0.16)';
-    ctx.lineWidth=1.2;
-    ctx.strokeRect(ix-laneW*2.2, iy-laneW*2.2, laneW*4.4, laneW*4.4);
-    ctx.font=`bold ${{Math.floor(laneW*0.85)}}px Arial`;
-    ctx.fillStyle=ic; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillText(il, ix, iy);
-  }});
-  drawIntersectionAStopMarkings(g);
+  // Intersection pads and stop bars
+  drawSquareIntersection(axA, roadY, laneW, 'A');
+  drawSquareIntersection(axB, roadY, laneW, 'B');
+  drawSquareIntersection(axC, roadY, laneW, 'C');
 
   // Traffic light dots
-  const tlOff = laneW*2.9;
-  drawTLDot(axA-tlOff, roadY-laneW, tlColor(TL.A,'ew'));
-  drawTLDot(axA+laneW, roadY-tlOff, tlColor(TL.A,'ns'));
-  const bLightOff = laneW*3.85;
-  drawTLDot(axB-bLightOff, roadY-laneW*1.3, tlColor(TL.B,'ew'));
-  drawTLDot(axB+bLightOff, roadY+laneW*1.3, tlColor(TL.B,'ew'));
-  drawTLDot(axB+laneW*1.3, roadY-bLightOff, tlColor(TL.B,'ns'));
-  drawTLDot(axB-laneW*1.3, roadY+bLightOff, tlColor(TL.B,'ns'));
-  drawTLDot(axC+tlOff, roadY+laneW, tlColor(TL.C,'ew'));
-  drawTLDot(axC-laneW, roadY+tlOff, tlColor(TL.C,'ns'));
+  drawIntersectionTrafficLights(axA, roadY, laneW, TL.A);
+  drawIntersectionTrafficLights(axB, roadY, laneW, TL.B);
+  drawIntersectionTrafficLights(axC, roadY, laneW, TL.C);
 
   // Labels
   ctx.textAlign='center';
@@ -2461,12 +2073,10 @@ function drawScene() {{
 
   // NIGHT: subtle intersection glow
   if (MODE==='NIGHT') {{
-    [[axA,roadY,'#7b8cde'],[axC,roadY,'#f97316']].forEach(([x,y,c]) => {{
+    [[axA,roadY,'#7b8cde'],[axB,roadY,'#f97316'],[axC,roadY,'#f97316']].forEach(([x,y,c]) => {{
       ctx.beginPath(); ctx.arc(x,y,rbR*1.6,0,Math.PI*2);
       ctx.fillStyle='rgba('+hexToRgb(c)+',0.04)'; ctx.fill();
     }});
-    ctx.fillStyle='rgba(86,207,178,0.035)';
-    ctx.fillRect(axB-laneW*4.6, roadY-laneW*4.6, laneW*9.2, laneW*9.2);
   }}
   ctx.restore();
 }}

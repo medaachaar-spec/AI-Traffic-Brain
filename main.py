@@ -37,7 +37,7 @@ from core.smart_controller import SmartController
 from core.rl_controller import (
     RLController,
     HYBRID_CONFIDENCE_THRESHOLD,
-    MIN_GREEN,
+    MIN_GREEN_TIME,
     PRETRAIN_INIT,
     PRETRAIN_INCREMENT,
     PRETRAIN_CAP,
@@ -182,7 +182,7 @@ class HybridController:
     """
 
     CONFIDENCE_THRESHOLD = HYBRID_CONFIDENCE_THRESHOLD
-    HOLD_TIME            = MIN_GREEN              # 8 s anti-oscillation
+    HOLD_TIME            = MIN_GREEN_TIME         # anti-oscillation hold time
 
     def __init__(self, env: TrafficEnv, qtable_path) -> None:
         self._env   = env

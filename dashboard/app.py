@@ -1,1458 +1,1620 @@
 """
-AI Traffic Brain — Streamlit comparison dashboard.
-Uses only: streamlit, plotly, subprocess, csv (stdlib), statistics (stdlib),
-           collections (stdlib).
+AI Traffic Brain - Streamlit results dashboard.
 
 Run with:
     streamlit run dashboard/app.py
 """
 
+from __future__ import annotations
+
 import csv
+import html
+import math
+import pickle
+import re
 import statistics
 import subprocess
 import sys
-from collections import defaultdict
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 import plotly.graph_objects as go
 import streamlit as st
-from dashboard.intersection_diagram import render_intersection
+
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths and controller configuration
 # ---------------------------------------------------------------------------
-ROOT       = Path(__file__).resolve().parent.parent
-DATA_DIR   = ROOT / "data"
-MAIN_PY    = ROOT / "main.py"
-FIXED_CSV  = DATA_DIR / "results_fixed.csv"
-SMART_CSV  = DATA_DIR / "results_smart.csv"
-VISION_CSV = DATA_DIR / "results_vision.csv"
-RL_CSV     = DATA_DIR / "results_rl.csv"
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / "data"
+QTABLE_PATH = DATA_DIR / "qtable.pkl"
+
+CONTROLLERS = {
+    "fixed": {
+        "label": "Fixed",
+        "file": "results_fixed.csv",
+        "color": "#ff9f1c",
+        "short": "Fixed cycle",
+    },
+    "smart": {
+        "label": "Smart",
+        "file": "results_smart.csv",
+        "color": "#2f80ff",
+        "short": "Adaptive rules",
+    },
+    "vision": {
+        "label": "Vision",
+        "file": "results_vision.csv",
+        "color": "#9b5cff",
+        "short": "Camera-aware",
+    },
+    "rl": {
+        "label": "RL",
+        "file": "results_rl.csv",
+        "color": "#22f3b6",
+        "short": "Q-learning",
+    },
+}
+
+EXPECTED_FILES = [cfg["file"] for cfg in CONTROLLERS.values()]
+
 
 # ---------------------------------------------------------------------------
-# Colour palette  ── Smart City Command Center
+# Column aliases
 # ---------------------------------------------------------------------------
-C_FIXED   = "#ff9500"   # amber
-C_SMART   = "#00d4ff"   # electric teal
-C_VISION  = "#8b5cf6"   # purple
-C_RL      = "#7C3AED"   # purple
-C_WARN    = "#ff4757"   # alert red
-C_TEXT    = "#c8d4f0"
-C_SUBTEXT = "#4a5a7a"
-C_SURFACE = "rgba(255,255,255,0.035)"
-C_BORDER  = "rgba(255,255,255,0.07)"
-C_BG      = "#0a0e1a"
 
-AREA_COLOURS = ["#00d4ff", "#ff9500", "#8b5cf6", "#10b981"]
-AREA_FILL_COLOURS = [
-    "rgba(0,212,255,0.12)",
-    "rgba(255,149,0,0.12)",
-    "rgba(139,92,246,0.12)",
-    "rgba(16,185,129,0.12)",
-]
+TIME_ALIASES = ("sim_time", "simulation_time", "time", "step", "timestep")
+TOTAL_WAIT_ALIASES = (
+    "total_waiting_time",
+    "total_wait",
+    "waiting_total",
+    "waiting_time_total",
+    "totalwaitingtime",
+    "total_waiting",
+)
+AVG_WAIT_ALIASES = (
+    "avg_waiting_time",
+    "average_waiting_time",
+    "avg_wait",
+    "mean_waiting_time",
+    "mean_wait",
+)
+TOTAL_QUEUE_ALIASES = ("total_queue", "queue_total", "current_queue")
+PEAK_QUEUE_ALIASES = ("peak_queue", "max_queue", "queue_peak")
+ARRIVED_ALIASES = ("vehicles_arrived", "arrived_vehicles", "arrived", "throughput")
+DEPARTED_ALIASES = ("vehicles_departed", "departed_vehicles", "departed")
+TOTAL_VEHICLE_ALIASES = ("total_vehicles", "vehicles", "vehicle_count")
+REWARD_ALIASES = ("total_reward", "episode_reward", "reward")
+EPSILON_ALIASES = ("epsilon", "eps")
+PHASE_CHANGE_ALIASES = ("phase_changes", "phase_change_count")
+PHASE_ALIASES = ("tl_phase", "phase", "controller_phase")
+EMERGENCY_ALIASES = ("emergency_count", "emergency", "emergency_vehicles")
+REASON_ALIASES = ("controller_reason", "reason", "control_reason")
 
-PLOTLY_BASE = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor ="rgba(0,0,0,0)",
-    font=dict(color=C_TEXT, family="'Space Mono', 'Courier New', monospace", size=11),
-    xaxis=dict(
-        showgrid=False,
-        zerolinecolor="rgba(255,255,255,0.06)",
-        linecolor="rgba(255,255,255,0.05)",
-        tickfont=dict(family="'Space Mono', 'Courier New', monospace", size=10),
-    ),
-    yaxis=dict(
-        showgrid=False,
-        zerolinecolor="rgba(255,255,255,0.06)",
-        linecolor="rgba(255,255,255,0.05)",
-        tickfont=dict(family="'Space Mono', 'Courier New', monospace", size=10),
-    ),
-    margin=dict(l=52, r=24, t=48, b=48),
+QUEUE_APPROACH_COLS = (
+    ("North", ("queue_north", "north_queue")),
+    ("South", ("queue_south", "south_queue")),
+    ("East", ("queue_east", "east_queue")),
+    ("West", ("queue_west", "west_queue")),
 )
 
-LEGEND_H = dict(
-    orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-    bgcolor="rgba(10,14,26,0.9)",
-    bordercolor="rgba(255,255,255,0.08)",
-    borderwidth=1,
-    font=dict(family="'Space Mono', 'Courier New', monospace", size=10),
+APPROACH_WAIT_COLS = (
+    ("North", ("north_wait", "north_waiting_time")),
+    ("South", ("south_wait", "south_waiting_time")),
+    ("East", ("east_wait", "east_waiting_time")),
+    ("West", ("west_wait", "west_waiting_time")),
 )
 
-# ---------------------------------------------------------------------------
-# Page config
-# ---------------------------------------------------------------------------
-st.set_page_config(
-    page_title="AI Traffic Brain",
-    page_icon="🚦",
-    layout="wide",
-    initial_sidebar_state="expanded",
+INTERSECTION_WAIT_COLS = (
+    ("int_A", ("intA_wait", "int_a_wait", "intersection_a_wait")),
+    ("int_B", ("intB_wait", "int_b_wait", "intersection_b_wait")),
+    ("int_C", ("intC_wait", "int_c_wait", "intersection_c_wait")),
 )
 
-# ---------------------------------------------------------------------------
-# Global CSS  ── Premium Smart City Command Center
-# ---------------------------------------------------------------------------
-st.html("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-
-/* ── Reset & Base ─────────────────────────────────────────────────────── */
-html, body, [data-testid="stAppViewContainer"] {
-    background-color: #0a0e1a !important;
-    background-image:
-        linear-gradient(rgba(0,212,255,0.022) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,212,255,0.022) 1px, transparent 1px);
-    background-size: 48px 48px;
-    color: #c8d4f0;
-    font-family: 'Inter', sans-serif;
-}
-[data-testid="stHeader"]           { background: transparent !important; }
-[data-testid="stMainBlockContainer"]{ padding-top: 0.5rem; }
-[data-testid="stVerticalBlock"]    { gap: 0.75rem; }
-
-/* ── Sidebar ──────────────────────────────────────────────────────────── */
-[data-testid="stSidebar"] {
-    background: linear-gradient(180deg,#060910 0%,#0b1020 45%,#080c1a 100%) !important;
-    border-right: 1px solid rgba(0,212,255,0.12) !important;
-    box-shadow: 4px 0 40px rgba(0,0,0,0.6);
-}
-[data-testid="stSidebar"] a {
-    color: #6b7a9e !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.84rem !important;
-    text-decoration: none !important;
-    transition: color 0.2s !important;
-}
-[data-testid="stSidebar"] a:hover { color: #00d4ff !important; }
-
-/* ── Animations ───────────────────────────────────────────────────────── */
-@keyframes fadeInUp {
-    from { opacity:0; transform:translateY(18px); }
-    to   { opacity:1; transform:translateY(0);    }
-}
-@keyframes logoPulse {
-    0%,100% { transform:scale(1) rotate(0deg); filter:drop-shadow(0 0 10px rgba(0,212,255,0.35)); }
-    30%     { transform:scale(1.08) rotate(-4deg); filter:drop-shadow(0 0 18px rgba(0,212,255,0.6)); }
-    70%     { transform:scale(1.08) rotate(4deg);  filter:drop-shadow(0 0 18px rgba(139,92,246,0.6)); }
-}
-@keyframes gradientShift {
-    0%   { background-position:0% 50%; }
-    50%  { background-position:100% 50%; }
-    100% { background-position:0% 50%; }
-}
-@keyframes statusBlink {
-    0%,100% { opacity:1; }
-    50%      { opacity:0.3; }
-}
-@keyframes shimmer {
-    from { left:-100%; }
-    to   { left:200%;  }
-}
-
-/* ── KPI Cards ────────────────────────────────────────────────────────── */
-.kpi-card {
-    position: relative;
-    background: rgba(255,255,255,0.03);
-    backdrop-filter: blur(24px) saturate(160%);
-    -webkit-backdrop-filter: blur(24px) saturate(160%);
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 18px;
-    padding: 26px 20px 22px;
-    text-align: center;
-    overflow: hidden;
-    transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1),
-                box-shadow 0.3s ease;
-    animation: fadeInUp 0.55s ease both;
-}
-.kpi-card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: var(--ka, rgba(0,212,255,0.7));
-    border-radius: 18px 18px 0 0;
-}
-.kpi-card::after {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: -100%;
-    width: 50%;
-    height: 100%;
-    background: linear-gradient(90deg,transparent,rgba(255,255,255,0.04),transparent);
-    transition: left 0.7s ease;
-    pointer-events: none;
-}
-.kpi-card:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 20px 60px rgba(0,0,0,0.7),
-                0 0 0 1px rgba(255,255,255,0.09),
-                0 0 40px var(--ka-glow, rgba(0,212,255,0.08));
-}
-.kpi-card:hover::after { left: 200%; }
-
-.kpi-label {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.62rem;
-    font-weight: 700;
-    color: #3a4a6a;
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    margin-bottom: 14px;
-}
-.kpi-value {
-    font-family: 'Space Mono', monospace;
-    font-size: 1.95rem;
-    font-weight: 700;
-    line-height: 1.1;
-    letter-spacing: -0.03em;
-}
-.kpi-delta {
-    font-family: 'Inter', sans-serif;
-    font-size: 0.76rem;
-    font-weight: 500;
-    margin-top: 11px;
-}
-.good  { color: #00d4ff; }
-.bad   { color: #ff4757; }
-.muted { color: #3a4a6a; }
-
-/* ── Mode Cards ───────────────────────────────────────────────────────── */
-.mode-card {
-    background: rgba(255,255,255,0.025);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 16px;
-    padding: 22px 18px;
-    height: 100%;
-    transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
-    animation: fadeInUp 0.5s ease both;
-}
-.mode-card:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 14px 44px rgba(0,0,0,0.6);
-    border-color: rgba(255,255,255,0.11);
-}
-.mode-icon { font-size: 1.65rem; margin-bottom: 11px; display: block; }
-.mode-name {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.68rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    margin-bottom: 8px;
-}
-.mode-desc {
-    font-family: 'Inter', sans-serif;
-    font-size: 0.81rem;
-    color: #3a4a6a;
-    line-height: 1.65;
-}
-.mode-badge {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-family: 'Space Mono', monospace;
-    font-size: 0.58rem;
-    font-weight: 700;
-    margin-bottom: 10px;
-    letter-spacing: 0.08em;
-}
-
-/* ── Insight Cards ────────────────────────────────────────────────────── */
-.insight-card {
-    background: rgba(255,255,255,0.025);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 16px;
-    padding: 26px 22px;
-    height: 100%;
-    transition: transform 0.25s ease;
-    animation: fadeInUp 0.65s ease both;
-}
-.insight-card:hover { transform: translateY(-4px); }
-.insight-icon  { font-size: 1.75rem; margin-bottom: 12px; display: block; }
-.insight-title {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.63rem;
-    font-weight: 700;
-    color: #3a4a6a;
-    text-transform: uppercase;
-    letter-spacing: 0.13em;
-    margin-bottom: 10px;
-}
-.insight-body {
-    font-family: 'Inter', sans-serif;
-    font-size: 0.86rem;
-    color: #6b7a9e;
-    line-height: 1.65;
-}
-.insight-stat {
-    font-family: 'Space Mono', monospace;
-    font-size: 1.55rem;
-    font-weight: 700;
-    margin: 10px 0 6px;
-    letter-spacing: -0.02em;
-}
-
-/* ── Camera Cards ─────────────────────────────────────────────────────── */
-.cam-card {
-    background: rgba(139,92,246,0.05);
-    border: 1px solid rgba(139,92,246,0.18);
-    border-radius: 14px;
-    padding: 18px 14px;
-    text-align: center;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
-}
-.cam-card:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 8px 32px rgba(139,92,246,0.15);
-}
-.cam-label {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.6rem;
-    color: #3a2a6a;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    margin-bottom: 10px;
-}
-.cam-value {
-    font-family: 'Space Mono', monospace;
-    font-size: 1.75rem;
-    font-weight: 700;
-    color: #8b5cf6;
-}
-.cam-sub {
-    font-family: 'Inter', sans-serif;
-    font-size: 0.72rem;
-    color: #3a2a6a;
-    margin-top: 6px;
-}
-
-/* ── Section Headings ─────────────────────────────────────────────────── */
-.sec {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.72rem;
-    font-weight: 700;
-    color: #c8d4f0;
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
-    border-left: 3px solid #00d4ff;
-    padding: 7px 0 7px 14px;
-    margin: 32px 0 20px;
-    background: linear-gradient(90deg, rgba(0,212,255,0.07) 0%, transparent 55%);
-    border-radius: 0 8px 8px 0;
-}
-.sec-vision {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.72rem;
-    font-weight: 700;
-    color: #c8d4f0;
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
-    border-left: 3px solid #8b5cf6;
-    padding: 7px 0 7px 14px;
-    margin: 32px 0 20px;
-    background: linear-gradient(90deg, rgba(139,92,246,0.07) 0%, transparent 55%);
-    border-radius: 0 8px 8px 0;
-}
-
-/* ── Emergency Table ──────────────────────────────────────────────────── */
-.emg-tbl { width:100%; border-collapse:collapse; font-size:0.83rem; }
-.emg-tbl th {
-    background: rgba(255,255,255,0.025);
-    color: #3a4a6a;
-    font-family: 'Space Mono', monospace;
-    font-weight: 700;
-    font-size: 0.6rem;
-    padding: 10px 14px;
-    text-align: left;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    border-bottom: 1px solid rgba(255,255,255,0.05);
-}
-.emg-tbl td {
-    padding: 9px 14px;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
-    font-family: 'Inter', sans-serif;
-}
-.emg-tbl tr:last-child td { border-bottom:none; }
-.emg-tbl tr:hover td     { background: rgba(255,255,255,0.02); }
-
-/* ── Badges ───────────────────────────────────────────────────────────── */
-.badge {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-family: 'Space Mono', monospace;
-    font-size: 0.6rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-}
-.bf { background:rgba(255,149,0,0.1);   color:#ff9500; border:1px solid rgba(255,149,0,0.28); }
-.bs { background:rgba(0,212,255,0.1);   color:#00d4ff; border:1px solid rgba(0,212,255,0.28); }
-.bv { background:rgba(139,92,246,0.1);  color:#8b5cf6; border:1px solid rgba(139,92,246,0.28); }
-
-/* ── Sidebar text helpers ─────────────────────────────────────────────── */
-.sb-title {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.88rem;
-    font-weight: 700;
-    color: #c8d4f0;
-    margin-bottom: 2px;
-}
-.sb-label {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.59rem;
-    color: #2a3a5a;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    margin-top: 18px;
-    margin-bottom: 5px;
-}
-.sb-value {
-    font-family: 'Inter', sans-serif;
-    font-size: 0.83rem;
-    color: #6b7a9e;
-    margin-bottom: 2px;
-}
-.sb-divider {
-    border: none;
-    border-top: 1px solid rgba(255,255,255,0.045);
-    margin: 18px 0;
-}
-
-/* ── Footer ───────────────────────────────────────────────────────────── */
-.footer {
-    text-align: center;
-    color: #1a2438;
-    font-family: 'Inter', sans-serif;
-    font-size: 0.73rem;
-    padding: 36px 0 18px;
-    border-top: 1px solid rgba(255,255,255,0.04);
-    margin-top: 48px;
-}
-.footer strong { color: #2a3a5a; }
-
-/* ── Streamlit widget overrides ───────────────────────────────────────── */
-.stButton > button {
-    background: linear-gradient(135deg,rgba(0,212,255,0.14),rgba(0,212,255,0.06)) !important;
-    border: 1px solid rgba(0,212,255,0.35) !important;
-    color: #00d4ff !important;
-    font-family: 'Space Mono', monospace !important;
-    font-size: 0.72rem !important;
-    font-weight: 700 !important;
-    letter-spacing: 0.1em !important;
-    border-radius: 10px !important;
-    text-transform: uppercase !important;
-    transition: all 0.25s ease !important;
-    padding: 10px 20px !important;
-}
-.stButton > button:hover {
-    background: rgba(0,212,255,0.22) !important;
-    box-shadow: 0 0 28px rgba(0,212,255,0.22) !important;
-    transform: translateY(-2px) !important;
-    border-color: rgba(0,212,255,0.6) !important;
-}
-.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg,rgba(0,212,255,0.2),rgba(139,92,246,0.15)) !important;
-    border-color: rgba(0,212,255,0.5) !important;
-}
-div[data-baseweb="select"] > div {
-    background: rgba(255,255,255,0.03) !important;
-    border: 1px solid rgba(255,255,255,0.08) !important;
-    border-radius: 10px !important;
-    color: #c8d4f0 !important;
-    font-family: 'Inter', sans-serif !important;
-}
-.stCheckbox label { font-family: 'Inter', sans-serif !important; color: #6b7a9e !important; }
-.stAlert { border-radius: 12px !important; }
-</style>
-""")
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Data structures
 # ---------------------------------------------------------------------------
-@st.cache_data
-def load_csv(path: Path) -> dict | None:
-    if not path.exists():
+
+@dataclass
+class ResultSet:
+    key: str
+    label: str
+    short: str
+    color: str
+    path: Path
+    found: bool
+    rows: list[dict[str, object]]
+    columns: dict[str, list[object]]
+    original_columns: list[str]
+    normalized_columns: dict[str, str]
+    error: str = ""
+    modified: str = ""
+
+    @property
+    def row_count(self) -> int:
+        return len(self.rows)
+
+    @property
+    def column_count(self) -> int:
+        return len(self.original_columns)
+
+
+# ---------------------------------------------------------------------------
+# Page config and CSS
+# ---------------------------------------------------------------------------
+
+def set_page_config() -> None:
+    st.set_page_config(
+        page_title="AI Traffic Brain",
+        page_icon="🚦",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+
+def inject_global_css() -> None:
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap');
+
+        :root {
+            --bg: #070b15;
+            --panel: rgba(13, 19, 34, 0.78);
+            --line: rgba(148, 163, 184, 0.16);
+            --text: #e5edf8;
+            --muted: #8fa0bd;
+            --faint: #4f607f;
+            --cyan: #00d4ff;
+            --blue: #2f80ff;
+            --purple: #9b5cff;
+            --green: #22f3b6;
+            --orange: #ff9f1c;
+        }
+
+        html, body, [data-testid="stAppViewContainer"] {
+            background:
+                linear-gradient(rgba(0, 212, 255, 0.026) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 212, 255, 0.026) 1px, transparent 1px),
+                linear-gradient(135deg, #050812 0%, #0a1020 52%, #080c18 100%) !important;
+            background-size: 44px 44px, 44px 44px, auto !important;
+            color: var(--text);
+            font-family: "Inter", sans-serif;
+        }
+
+        [data-testid="stHeader"] { background: transparent !important; }
+        [data-testid="stMainBlockContainer"] {
+            padding: 0.75rem clamp(1rem, 2vw, 2rem) 2rem;
+            max-width: 1360px;
+        }
+        [data-testid="stVerticalBlock"] { gap: 0.62rem; }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #050812 0%, #081020 58%, #050812 100%) !important;
+            border-right: 1px solid rgba(0, 212, 255, 0.12) !important;
+            box-shadow: 8px 0 34px rgba(0, 0, 0, 0.38);
+        }
+        [data-testid="stSidebarContent"] { padding: 0.85rem 0.78rem 1rem; }
+        [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+            margin-bottom: 10px;
+            border: 1px solid rgba(0, 212, 255, 0.15) !important;
+            border-radius: 8px !important;
+            background:
+                linear-gradient(145deg, rgba(0, 212, 255, 0.055), rgba(155, 92, 255, 0.035)),
+                rgba(9, 14, 27, 0.70) !important;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.045), 0 12px 34px rgba(0,0,0,0.22);
+        }
+        [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] > div { padding: 10px 11px !important; }
+        [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlock"] { gap: 0.55rem !important; }
+        [data-testid="stSidebar"] .stSelectbox {
+            margin: 0 0 0.62rem 0 !important;
+        }
+        [data-testid="stSidebar"] .stCheckbox {
+            margin: 0.2rem 0 0.55rem 0 !important;
+        }
+        [data-testid="stSidebar"] .stButton {
+            margin-top: 0.12rem !important;
+        }
+
+        @keyframes sidebarPulse {
+            0%, 100% { filter: drop-shadow(0 0 8px rgba(0, 212, 255, 0.26)); transform: scale(1); }
+            50% { filter: drop-shadow(0 0 14px rgba(34, 243, 182, 0.32)); transform: scale(1.04); }
+        }
+        @keyframes statusBlink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.38; }
+        }
+        .sb-card {
+            position: relative;
+            margin-bottom: 10px;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 212, 255, 0.15);
+            background:
+                linear-gradient(145deg, rgba(0, 212, 255, 0.055), rgba(155, 92, 255, 0.035)),
+                rgba(9, 14, 27, 0.70);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.045), 0 12px 34px rgba(0,0,0,0.22);
+            overflow: hidden;
+        }
+        .sb-card::before {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(0, 212, 255, 0.42), transparent);
+        }
+        .sb-card.identity {
+            border-color: rgba(0, 212, 255, 0.22);
+            background:
+                linear-gradient(135deg, rgba(0, 212, 255, 0.10), rgba(34, 243, 182, 0.045) 58%, rgba(155, 92, 255, 0.035)),
+                rgba(8, 14, 27, 0.82);
+        }
+        .sb-identity {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 0 0 9px 0;
+        }
+        .sb-logo {
+            display: grid;
+            place-items: center;
+            width: 34px;
+            height: 34px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 212, 255, 0.26);
+            background: rgba(0, 212, 255, 0.08);
+            font-size: 1.42rem;
+            line-height: 1;
+            animation: sidebarPulse 4.5s ease-in-out infinite;
+        }
+        .sb-title {
+            font-family: "Space Mono", monospace;
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: #f2f8ff;
+            letter-spacing: 0.04em;
+        }
+        .sb-sub {
+            margin-top: 3px;
+            color: var(--faint);
+            font-size: 0.7rem;
+        }
+        .sb-online {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            width: fit-content;
+            padding: 5px 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(34, 243, 182, 0.36);
+            background: rgba(34, 243, 182, 0.075);
+            color: var(--green);
+            font-family: "Space Mono", monospace;
+            font-size: 0.55rem;
+            font-weight: 700;
+            letter-spacing: 0.10em;
+            text-transform: uppercase;
+            box-shadow: 0 0 20px rgba(34, 243, 182, 0.10);
+        }
+        .sb-online-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 999px;
+            background: var(--green);
+            box-shadow: 0 0 14px rgba(34, 243, 182, 0.5);
+            animation: statusBlink 2.2s ease-in-out infinite;
+        }
+        .sb-card-title {
+            margin-bottom: 8px;
+            color: #dff7ff;
+            font-family: "Space Mono", monospace;
+            font-size: 0.62rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }
+        .sb-label {
+            font-family: "Space Mono", monospace;
+            color: var(--faint);
+            font-size: 0.58rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+        .sb-value {
+            color: var(--muted);
+            font-size: 0.76rem;
+            line-height: 1.38;
+            margin-bottom: 4px;
+        }
+        .sb-value.strong {
+            color: #dbe7f6;
+            font-weight: 700;
+        }
+        .sb-accent {
+            color: var(--cyan);
+            font-family: "Space Mono", monospace;
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+        .sb-footer {
+            color: var(--faint);
+            font-family: "Space Mono", monospace;
+            font-size: 0.62rem;
+            letter-spacing: 0.08em;
+            text-align: center;
+            text-transform: uppercase;
+        }
+
+        .hero {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+            gap: 16px;
+            align-items: stretch;
+            padding: 22px;
+            border: 1px solid rgba(0, 212, 255, 0.18);
+            border-radius: 8px;
+            background:
+                linear-gradient(120deg, rgba(0, 212, 255, 0.10), rgba(155, 92, 255, 0.07) 42%, rgba(34, 243, 182, 0.04)),
+                rgba(9, 14, 27, 0.76);
+            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+            overflow: hidden;
+        }
+        .hero-title {
+            margin: 0;
+            font-family: "Space Mono", monospace;
+            font-size: clamp(2rem, 4.4vw, 3.65rem);
+            line-height: 0.98;
+            color: #f4f9ff;
+        }
+        .hero-kicker {
+            margin-bottom: 9px;
+            font-family: "Space Mono", monospace;
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--cyan);
+        }
+        .hero-subtitle {
+            margin: 10px 0 14px 0;
+            color: var(--muted);
+            font-size: 0.95rem;
+        }
+        .hero-meta {
+            margin-top: 12px;
+            color: var(--faint);
+            font-size: 0.78rem;
+            line-height: 1.45;
+        }
+        .badge-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 7px;
+        }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            min-height: 25px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(0, 212, 255, 0.26);
+            background: rgba(0, 212, 255, 0.08);
+            color: #bff4ff;
+            font-family: "Space Mono", monospace;
+            font-size: 0.62rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .verdict-card, .kpi-card, .insight-card, .status-card {
+            border-radius: 8px;
+            border: 1px solid var(--line);
+            background: var(--panel);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 48px rgba(0,0,0,0.28);
+        }
+        .verdict-card {
+            padding: 18px;
+            border-color: rgba(34, 243, 182, 0.32);
+            background:
+                linear-gradient(145deg, rgba(34, 243, 182, 0.13), rgba(47, 128, 255, 0.06)),
+                rgba(8, 14, 27, 0.86);
+        }
+        .verdict-label, .kpi-label, .card-label {
+            font-family: "Space Mono", monospace;
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--faint);
+        }
+        .verdict-value {
+            margin-top: 9px;
+            font-family: "Space Mono", monospace;
+            font-size: clamp(1.9rem, 3vw, 2.35rem);
+            line-height: 1;
+            color: var(--green);
+        }
+        .verdict-delta {
+            margin-top: 10px;
+            color: #c8fff0;
+            font-size: 0.86rem;
+            line-height: 1.45;
+        }
+        .verdict-note {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255,255,255,0.07);
+            color: var(--faint);
+            font-size: 0.75rem;
+            line-height: 1.45;
+        }
+        .section-title {
+            margin: 22px 0 10px 0;
+            padding-left: 12px;
+            border-left: 3px solid var(--cyan);
+            font-family: "Space Mono", monospace;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: #f0f7ff;
+        }
+        .section-title span {
+            color: var(--faint);
+            font-weight: 400;
+            margin-left: 8px;
+            letter-spacing: 0.08em;
+        }
+        .subsection-label {
+            margin: 14px 0 8px 0;
+            font-family: "Space Mono", monospace;
+            font-size: 0.69rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: #9fb1d0;
+        }
+        .chart-caption {
+            margin: -4px 0 8px 2px;
+            color: var(--faint);
+            font-size: 0.76rem;
+            line-height: 1.45;
+        }
+        .kpi-card {
+            min-height: 142px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            overflow: hidden;
+        }
+        .kpi-card::before {
+            content: "";
+            display: block;
+            height: 2px;
+            margin: -16px -16px 12px -16px;
+            background: var(--accent);
+            box-shadow: 0 0 24px var(--accent-soft);
+        }
+        .kpi-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .kpi-tag {
+            flex: 0 0 auto;
+            padding: 3px 7px;
+            border-radius: 999px;
+            border: 1px solid var(--accent-soft);
+            color: var(--accent);
+            background: rgba(255,255,255,0.035);
+            font-family: "Space Mono", monospace;
+            font-size: 0.56rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .kpi-value {
+            margin-top: 11px;
+            font-family: "Space Mono", monospace;
+            font-size: clamp(1.45rem, 2.7vw, 2.05rem);
+            line-height: 1;
+            color: #f6fbff;
+            overflow-wrap: anywhere;
+        }
+        .kpi-unit {
+            margin-top: 5px;
+            color: var(--muted);
+            font-size: 0.82rem;
+        }
+        .kpi-delta {
+            margin-top: 10px;
+            color: var(--delta);
+            font-size: 0.78rem;
+            line-height: 1.35;
+        }
+        .insight-card {
+            min-height: 116px;
+            padding: 16px;
+            border-color: rgba(148, 163, 184, 0.14);
+        }
+        .insight-stat {
+            margin-top: 9px;
+            font-family: "Space Mono", monospace;
+            font-size: 1.28rem;
+            line-height: 1.05;
+            color: var(--accent);
+            overflow-wrap: anywhere;
+        }
+        .insight-body {
+            margin-top: 9px;
+            color: var(--muted);
+            font-size: 0.84rem;
+            line-height: 1.45;
+        }
+        .story-panel {
+            margin-bottom: 10px;
+            padding: 16px 18px;
+            border-radius: 8px;
+            border: 1px solid rgba(34, 243, 182, 0.20);
+            background:
+                linear-gradient(120deg, rgba(34, 243, 182, 0.08), rgba(47, 128, 255, 0.045)),
+                rgba(8, 14, 27, 0.74);
+        }
+        .story-title {
+            font-family: "Space Mono", monospace;
+            font-size: 0.76rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: #dffdf4;
+        }
+        .story-body {
+            margin-top: 7px;
+            color: var(--muted);
+            font-size: 0.86rem;
+            line-height: 1.5;
+        }
+        .compare-card {
+            min-height: 344px;
+            padding: 14px;
+            border-radius: 8px;
+            border: 1px solid var(--line);
+            background: rgba(13, 19, 34, 0.70);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+        }
+        .compare-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.78rem;
+        }
+        .compare-table th {
+            padding: 9px 8px;
+            color: var(--faint);
+            font-family: "Space Mono", monospace;
+            font-size: 0.58rem;
+            letter-spacing: 0.10em;
+            text-transform: uppercase;
+            text-align: left;
+            border-bottom: 1px solid rgba(148,163,184,0.12);
+        }
+        .compare-table td {
+            padding: 10px 8px;
+            color: #dbe7f6;
+            border-bottom: 1px solid rgba(148,163,184,0.07);
+            vertical-align: middle;
+        }
+        .compare-table tr:last-child td { border-bottom: none; }
+        .compare-name {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            font-weight: 700;
+        }
+        .compare-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            box-shadow: 0 0 16px currentColor;
+        }
+        .compare-badge {
+            display: inline-block;
+            padding: 3px 7px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(148,163,184,0.12);
+            color: #9fb1d0;
+            font-family: "Space Mono", monospace;
+            font-size: 0.56rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .compare-badge.best {
+            color: var(--green);
+            border-color: rgba(34,243,182,0.32);
+            background: rgba(34,243,182,0.08);
+        }
+        .compare-badge.watch {
+            color: var(--orange);
+            border-color: rgba(255,159,28,0.30);
+            background: rgba(255,159,28,0.08);
+        }
+        .status-card {
+            min-height: 92px;
+            padding: 13px;
+            border-color: rgba(148, 163, 184, 0.13);
+        }
+        .status-card-value {
+            margin-top: 9px;
+            font-family: "Space Mono", monospace;
+            font-size: 1.08rem;
+            color: #f5faff;
+        }
+        .status-card-meta {
+            margin-top: 6px;
+            color: var(--faint);
+            font-size: 0.73rem;
+            line-height: 1.35;
+        }
+        .status-ok { color: var(--green); }
+        .status-warn { color: var(--orange); }
+        .stButton > button {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.15), rgba(47, 128, 255, 0.08)) !important;
+            border: 1px solid rgba(0, 212, 255, 0.34) !important;
+            color: #c9f7ff !important;
+            border-radius: 8px !important;
+            font-family: "Space Mono", monospace !important;
+            font-size: 0.72rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.08em !important;
+            text-transform: uppercase !important;
+        }
+        div[data-baseweb="select"] > div {
+            background: rgba(255, 255, 255, 0.035) !important;
+            border: 1px solid rgba(148, 163, 184, 0.14) !important;
+            border-radius: 8px !important;
+            color: var(--text) !important;
+            min-height: 40px !important;
+        }
+        .stPlotlyChart {
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        @media (max-width: 900px) {
+            .hero { grid-template-columns: 1fr; padding: 20px; }
+            .verdict-value { font-size: 2rem; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# General helpers
+# ---------------------------------------------------------------------------
+
+def clean_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
+
+
+def parse_value(value: object) -> object:
+    if value is None:
         return None
-    columns: dict[str, list] = defaultdict(list)
-    with open(path, newline="") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            for key, val in row.items():
-                try:
-                    columns[key].append(float(val))
-                except (ValueError, TypeError):
-                    columns[key].append(val)
-    return dict(columns)
+    text = str(value).strip()
+    if text == "":
+        return None
+    lowered = text.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        return float(text)
+    except ValueError:
+        return text
 
 
-def rolling_mean(values: list[float], window: int) -> list[float]:
-    out = []
-    for i in range(len(values)):
-        start = max(0, i - window + 1)
-        out.append(statistics.mean(values[start : i + 1]))
+def is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def as_float(value: object) -> float | None:
+    return float(value) if is_number(value) else None
+
+
+def number_values(values: Iterable[object]) -> list[float]:
+    return [float(value) for value in values if is_number(value)]
+
+
+def safe_mean(values: Iterable[object]) -> float | None:
+    nums = number_values(values)
+    return statistics.fmean(nums) if nums else None
+
+
+def safe_max(values: Iterable[object]) -> float | None:
+    nums = number_values(values)
+    return max(nums) if nums else None
+
+
+def safe_sum(values: Iterable[object]) -> float | None:
+    nums = number_values(values)
+    return sum(nums) if nums else None
+
+
+def safe_last(values: Iterable[object]) -> object | None:
+    for value in reversed(list(values)):
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def pct_lower(target: float | None, baseline: float | None) -> float | None:
+    if target is None or baseline is None or abs(baseline) < 1e-9:
+        return None
+    return (baseline - target) / abs(baseline) * 100
+
+
+def pct_higher(target: float | None, baseline: float | None) -> float | None:
+    if target is None or baseline is None or abs(baseline) < 1e-9:
+        return None
+    return (target - baseline) / abs(baseline) * 100
+
+
+def fmt_value(value: object, decimals: int = 1, compact: bool = False) -> str:
+    numeric = as_float(value)
+    if numeric is None:
+        return "—"
+    if compact and abs(numeric) >= 1000:
+        text = f"{numeric / 1000:.1f}k"
+        return text.replace(".0k", "k")
+    if abs(numeric - round(numeric)) < 1e-9:
+        return f"{numeric:.0f}"
+    return f"{numeric:.{decimals}f}"
+
+
+def format_delta(delta: float | None, better_word: str = "lower") -> tuple[str, str]:
+    if delta is None:
+        return "Baseline unavailable", "#8fa0bd"
+    if delta >= 0:
+        return f"{delta:.1f}% {better_word} vs Fixed", "#22f3b6"
+    inverse = "higher" if better_word == "lower" else "lower"
+    return f"{abs(delta):.1f}% {inverse} vs Fixed", "#ff9f1c"
+
+
+def escape_text(value: object) -> str:
+    return html.escape(str(value))
+
+
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    color = hex_color.lstrip("#")
+    if len(color) != 6:
+        return f"rgba(0, 212, 255, {alpha})"
+    r = int(color[0:2], 16)
+    g = int(color[2:4], 16)
+    b = int(color[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+def rolling_mean(values: list[object], window: int) -> list[float | None]:
+    if window <= 1:
+        return [as_float(value) for value in values]
+    out: list[float | None] = []
+    numeric: list[float] = []
+    for value in values:
+        num = as_float(value)
+        numeric.append(num if num is not None else float("nan"))
+        recent = [item for item in numeric[-window:] if math.isfinite(item)]
+        out.append(statistics.fmean(recent) if recent else None)
     return out
 
 
-def col(d: dict, key: str) -> list:
-    return d.get(key, [])
+def find_column(result: ResultSet, aliases: Iterable[str], *, fuzzy: bool = False) -> str | None:
+    normalized_aliases = [clean_name(alias) for alias in aliases]
+    for alias in normalized_aliases:
+        if alias in result.normalized_columns:
+            return result.normalized_columns[alias]
+    if not fuzzy:
+        return None
+    for original in result.original_columns:
+        cleaned = clean_name(original)
+        if any(alias and alias in cleaned for alias in normalized_aliases):
+            return original
+    return None
 
-def safe_mean(lst: list) -> float:
-    nums = [v for v in lst if isinstance(v, (int, float))]
-    return statistics.mean(nums) if nums else 0.0
 
-def safe_max(lst: list) -> float:
-    nums = [v for v in lst if isinstance(v, (int, float))]
-    return max(nums) if nums else 0.0
+def get_series(result: ResultSet, aliases: Iterable[str], *, fuzzy: bool = False) -> list[object]:
+    column = find_column(result, aliases, fuzzy=fuzzy)
+    return result.columns.get(column, []) if column else []
 
-def total_queue(d: dict) -> list[float]:
-    return [a + b + c + w for a, b, c, w in zip(
-        col(d, "queue_north"), col(d, "queue_south"),
-        col(d, "queue_east"),  col(d, "queue_west"),
-    )]
 
-def pct_change(new: float, base: float) -> float:
-    return (base - new) / max(abs(base), 1e-9) * 100
+def row_sum_series(result: ResultSet, specs: Iterable[tuple[str, Iterable[str]]]) -> list[float]:
+    columns = [find_column(result, aliases) for _, aliases in specs]
+    columns = [column for column in columns if column]
+    if not columns:
+        return []
+    length = max((len(result.columns.get(column, [])) for column in columns), default=0)
+    totals: list[float] = []
+    for idx in range(length):
+        total = 0.0
+        has_value = False
+        for column in columns:
+            values = result.columns.get(column, [])
+            if idx < len(values):
+                num = as_float(values[idx])
+                if num is not None:
+                    total += num
+                    has_value = True
+        totals.append(total if has_value else float("nan"))
+    return totals
 
-def delta_label(pct: float, better_is_lower: bool = True) -> tuple[str, str]:
-    improved = pct > 0 if better_is_lower else pct < 0
-    sym = "▼" if pct > 0 else "▲"
-    cls = "good" if improved else "bad"
-    return f"{sym} {abs(pct):.1f}% vs fixed", cls
+
+def ordered_loaded_results(results: dict[str, ResultSet]) -> list[ResultSet]:
+    return [results[key] for key in CONTROLLERS if key in results and results[key].found and results[key].row_count > 0]
+
 
 # ---------------------------------------------------------------------------
-# ── SIDEBAR
+# Data loading and metrics
 # ---------------------------------------------------------------------------
-with st.sidebar:
-    st.html("""
-    <div style="padding:16px 0 10px 0;">
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">
-        <div style="font-size:2rem;animation:logoPulse 5s ease-in-out infinite;">🚦</div>
-        <div>
-          <div style="font-family:'Space Mono',monospace;font-size:0.82rem;font-weight:700;
-                      background:linear-gradient(130deg,#00d4ff,#8b5cf6);
-                      -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-                      background-clip:text;letter-spacing:0.04em;">
-            AI TRAFFIC BRAIN
-          </div>
-          <div style="font-family:'Inter',sans-serif;font-size:0.67rem;color:#2a3a5a;
-                      margin-top:2px;letter-spacing:0.05em;">
-            Smart City Command Center
-          </div>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;
-                  background:rgba(16,185,129,0.07);
-                  border:1px solid rgba(16,185,129,0.18);
-                  border-radius:8px;padding:6px 12px;">
-        <div style="width:7px;height:7px;border-radius:50%;background:#10b981;
-                    flex-shrink:0;animation:statusBlink 2.5s ease infinite;"></div>
-        <span style="font-family:'Space Mono',monospace;font-size:0.6rem;color:#10b981;
-                     letter-spacing:0.1em;">SYSTEM ONLINE</span>
-      </div>
-    </div>
-    """)
 
-    st.html('<hr class="sb-divider">')
+def load_results() -> dict[str, ResultSet]:
+    loaded: dict[str, ResultSet] = {}
+    for key, cfg in CONTROLLERS.items():
+        path = DATA_DIR / cfg["file"]
+        found = path.exists()
+        rows: list[dict[str, object]] = []
+        columns: dict[str, list[object]] = {}
+        original_columns: list[str] = []
+        error = ""
+        modified = ""
 
-    st.html("""
-    <div class="sb-label" style="margin-top:0;">Project</div>
-    <div class="sb-value">ACHAAR Mohammed Amine</div>
-    <div class="sb-value">ZAKANE Mohamed</div>
-
-    <div class="sb-label">Supervisor</div>
-    <div class="sb-value">Dr. EN-NOUAARY ABDESLAM</div>
-
-    <div class="sb-label">Institution</div>
-    <div class="sb-value">Institut National des Postes et Télécommunications</div>
-    <div style="font-family:'Space Mono',monospace;font-size:0.7rem;color:#00d4ff;
-                font-weight:700;margin-top:4px;letter-spacing:0.06em;">
-      INPT · RABAT, MOROCCO
-    </div>
-    """)
-
-    st.html('<hr class="sb-divider">')
-
-    st.html('<div class="sb-label" style="margin-top:0;">Navigation</div>')
-    st.page_link("app.py",            label="📊  Performance Dashboard")
-    st.page_link("pages/live_map.py", label="🎬  Live Map Demo")
-
-    st.html('<hr class="sb-divider">')
-
-    st.html('<div class="sb-label" style="margin-top:0;">Run Simulation</div>')
-
-    _MODE_LABELS = {
-        "fixed":  "Fixed cycle (30 s / 5 s)",
-        "smart":  "Smart adaptive (demand-based)",
-        "vision": "Vision — Camera AI",
-        "rl":     "Q-Learning (trained AI)",
-    }
-    sim_mode = st.selectbox(
-        "Controller mode",
-        options=list(_MODE_LABELS.keys()),
-        format_func=lambda x: _MODE_LABELS[x],
-        label_visibility="collapsed",
-    )
-
-    gui_flag = st.checkbox("Open SUMO GUI", value=False)
-    run_btn  = st.button("▶  Run Simulation", use_container_width=True, type="primary")
-
-    if run_btn:
-        cmd = [sys.executable, str(MAIN_PY), "--mode", sim_mode]
-        if gui_flag:
-            cmd.append("--gui")
-        status_box = st.empty()
-        with st.spinner(f"Running **{sim_mode}** simulation…"):
+        if found:
             try:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, cwd=str(ROOT),
-                )
-                if result.returncode == 0:
-                    status_box.success(f"✅ {sim_mode.capitalize()} simulation complete!")
-                    load_csv.clear()
-                    st.rerun()
-                else:
-                    status_box.error("Simulation failed. See details below.")
-                    st.code(result.stderr[-2000:], language="bash")
-            except FileNotFoundError:
-                st.error("`main.py` not found. Check your project root path.")
+                modified = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
+                with open(path, newline="", encoding="utf-8-sig", errors="replace") as handle:
+                    reader = csv.DictReader(handle)
+                    original_columns = list(reader.fieldnames or [])
+                    columns = {name: [] for name in original_columns}
+                    for row in reader:
+                        parsed_row: dict[str, object] = {}
+                        for name in original_columns:
+                            parsed = parse_value(row.get(name))
+                            parsed_row[name] = parsed
+                            columns[name].append(parsed)
+                        rows.append(parsed_row)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
 
-    st.html('<hr class="sb-divider">')
-    st.html(
-        '<div style="font-family:\'Inter\',sans-serif;font-size:0.68rem;color:#1a2438;'
-        'text-align:center;letter-spacing:0.04em;">Academic Project · 2025–2026</div>',
+        loaded[key] = ResultSet(
+            key=key,
+            label=str(cfg["label"]),
+            short=str(cfg["short"]),
+            color=str(cfg["color"]),
+            path=path,
+            found=found and not error,
+            rows=rows,
+            columns=columns,
+            original_columns=original_columns,
+            normalized_columns={clean_name(column): column for column in original_columns},
+            error=error,
+            modified=modified,
+        )
+    return loaded
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_qtable_info() -> dict[str, object]:
+    if not QTABLE_PATH.exists():
+        return {"exists": False, "entries": None, "error": "", "modified": ""}
+    try:
+        with open(QTABLE_PATH, "rb") as handle:
+            qtable = pickle.load(handle)
+        entries = len(qtable) if hasattr(qtable, "__len__") else None
+        modified = time.strftime("%Y-%m-%d %H:%M", time.localtime(QTABLE_PATH.stat().st_mtime))
+        return {"exists": True, "entries": entries, "error": "", "modified": modified}
+    except Exception as exc:
+        return {"exists": True, "entries": None, "error": f"{type(exc).__name__}: {exc}", "modified": ""}
+
+
+def compute_phase_changes(result: ResultSet) -> int | None:
+    logged_changes = get_series(result, PHASE_CHANGE_ALIASES)
+    if logged_changes:
+        total = safe_sum(logged_changes)
+        return int(total) if total is not None else None
+    phase_values = [value for value in get_series(result, PHASE_ALIASES) if value is not None]
+    if len(phase_values) < 2:
+        return None
+    return sum(1 for prev, cur in zip(phase_values, phase_values[1:]) if cur != prev)
+
+
+def compute_reward(result: ResultSet) -> float | None:
+    reward_col = find_column(result, REWARD_ALIASES)
+    if not reward_col:
+        return None
+    values = result.columns.get(reward_col, [])
+    if clean_name(reward_col) in {clean_name("total_reward"), clean_name("episode_reward")}:
+        return as_float(safe_last(values))
+    return safe_sum(values)
+
+
+def compute_metrics(results: dict[str, ResultSet]) -> dict[str, dict[str, object]]:
+    metrics: dict[str, dict[str, object]] = {}
+    for result in ordered_loaded_results(results):
+        time_series = get_series(result, TIME_ALIASES) or list(range(1, result.row_count + 1))
+        total_wait = get_series(result, TOTAL_WAIT_ALIASES, fuzzy=True)
+        avg_wait = get_series(result, AVG_WAIT_ALIASES, fuzzy=True)
+        wait_basis = "avg_waiting_time" if avg_wait else "total_waiting_time"
+        avg_wait_value = safe_mean(avg_wait) if avg_wait else safe_mean(total_wait)
+        total_wait_average = safe_mean(total_wait)
+
+        total_queue_logged = get_series(result, TOTAL_QUEUE_ALIASES)
+        queue_series = total_queue_logged or row_sum_series(result, QUEUE_APPROACH_COLS)
+        peak_queue_logged = get_series(result, PEAK_QUEUE_ALIASES)
+        peak_queue = safe_max(peak_queue_logged) if peak_queue_logged else safe_max(queue_series)
+
+        arrived = get_series(result, ARRIVED_ALIASES)
+        departed = get_series(result, DEPARTED_ALIASES)
+        total_vehicles = get_series(result, TOTAL_VEHICLE_ALIASES)
+        if arrived:
+            throughput = safe_max(arrived)
+            throughput_source = "vehicles arrived"
+        elif departed:
+            throughput = safe_max(departed)
+            throughput_source = "vehicles departed"
+        else:
+            throughput = safe_max(total_vehicles)
+            throughput_source = "max active vehicles"
+
+        emergency_values = get_series(result, EMERGENCY_ALIASES)
+        emergency_steps = sum(1 for value in emergency_values if (as_float(value) or 0) > 0)
+        time_nums = number_values(time_series)
+        duration = max(time_nums) - min(time_nums) if len(time_nums) > 1 else None
+
+        metrics[result.label] = {
+            "key": result.key,
+            "label": result.label,
+            "short": result.short,
+            "color": result.color,
+            "rows": result.row_count,
+            "avg_wait": avg_wait_value,
+            "avg_wait_unit": "s/veh" if wait_basis == "avg_waiting_time" else "s",
+            "wait_basis": wait_basis,
+            "avg_total_wait": total_wait_average,
+            "total_wait_series": total_wait,
+            "time_series": time_series,
+            "queue_series": queue_series,
+            "peak_queue": peak_queue,
+            "throughput": throughput,
+            "throughput_source": throughput_source,
+            "duration": duration,
+            "emergency_steps": emergency_steps,
+            "phase_changes": compute_phase_changes(result),
+            "reward_total": compute_reward(result),
+            "epsilon": as_float(safe_last(get_series(result, EPSILON_ALIASES))),
+        }
+    return metrics
+
+
+def best_by_metric(
+    metrics: dict[str, dict[str, object]],
+    field: str,
+    *,
+    higher_is_better: bool = False,
+) -> tuple[str, dict[str, object]] | None:
+    candidates = [(label, metric) for label, metric in metrics.items() if as_float(metric.get(field)) is not None]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: as_float(item[1].get(field)) or 0, reverse=higher_is_better)[0]
+
+
+# ---------------------------------------------------------------------------
+# Rendering helpers
+# ---------------------------------------------------------------------------
+
+def apply_plot_theme(fig: go.Figure, *, height: int = 360, showlegend: bool = True) -> go.Figure:
+    fig.update_layout(
+        height=height,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, sans-serif", color="#dbe7f6", size=12),
+        margin=dict(l=52, r=22, t=54, b=48),
+        showlegend=showlegend,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.03,
+            xanchor="right",
+            x=1,
+            bgcolor="rgba(7, 11, 21, 0.78)",
+            bordercolor="rgba(148,163,184,0.14)",
+            borderwidth=1,
+            font=dict(size=10),
+        ),
+        hoverlabel=dict(bgcolor="rgba(7, 11, 21, 0.96)", bordercolor="rgba(0, 212, 255, 0.22)"),
+        hovermode="x unified",
     )
-
-# ---------------------------------------------------------------------------
-# Load data
-# ---------------------------------------------------------------------------
-fixed  = load_csv(FIXED_CSV)
-smart  = load_csv(SMART_CSV)
-vision = load_csv(VISION_CSV)
-rl     = load_csv(RL_CSV)
-
-both          = fixed is not None and smart is not None
-vision_avail  = vision is not None
-rl_avail      = rl is not None
-
-fixed_rows    = len(col(fixed, "sim_time")) if fixed else 0
-fixed_partial = fixed_rows > 0 and fixed_rows < 3000
-
-if not vision_avail:
-    st.warning(
-        "**Vision data not found** (`data/results_vision.csv`). "
-        "Camera Intelligence sections will be unavailable. "
-        "Select **Vision — Camera AI** in the sidebar and click **Run Simulation** to generate it."
+    fig.update_xaxes(
+        gridcolor="rgba(148,163,184,0.09)",
+        zeroline=False,
+        linecolor="rgba(148,163,184,0.14)",
+        tickfont=dict(color="#91a4c2"),
+        title_font=dict(color="#9fb1d0", size=11),
+        title_standoff=12,
     )
-
-WINDOW = 30
-
-# ---------------------------------------------------------------------------
-# ── PAGE HEADER
-# ---------------------------------------------------------------------------
-st.html("""
-<div style="padding:10px 0 28px 0;position:relative;overflow:hidden;">
-
-  <!-- Decorative corner glow -->
-  <div style="position:absolute;top:-20px;right:-20px;width:280px;height:160px;
-              background:radial-gradient(ellipse at top right,
-                rgba(0,212,255,0.08) 0%,rgba(139,92,246,0.05) 40%,transparent 70%);
-              pointer-events:none;border-radius:0 0 0 120px;"></div>
-
-  <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;">
-
-    <!-- Logo -->
-    <div style="font-size:2.6rem;animation:logoPulse 5s ease-in-out infinite;flex-shrink:0;">
-      🚦
-    </div>
-
-    <!-- Title block -->
-    <div style="flex:1;min-width:280px;">
-      <h1 style="font-family:'Space Mono',monospace;font-size:1.9rem;font-weight:700;
-                 margin:0 0 6px 0;line-height:1.1;
-                 background:linear-gradient(130deg,#00d4ff 0%,#8b5cf6 55%,#00d4ff 100%);
-                 background-size:200% auto;
-                 -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-                 background-clip:text;animation:gradientShift 5s ease infinite;">
-        AI Traffic Brain
-      </h1>
-      <p style="font-family:'Inter',sans-serif;color:#2a3a5a;margin:0;
-                font-size:0.82rem;letter-spacing:0.07em;font-weight:500;">
-        SMART CITY COMMAND CENTER &nbsp;·&nbsp; FIXED · SMART · VISION · Q-LEARNING
-        &nbsp;·&nbsp; SUMO SIMULATION
-      </p>
-    </div>
-
-    <!-- INPT Badge -->
-    <div style="flex-shrink:0;background:rgba(0,212,255,0.06);
-                border:1px solid rgba(0,212,255,0.18);border-radius:12px;
-                padding:10px 18px;text-align:center;">
-      <div style="font-family:'Space Mono',monospace;font-size:1.15rem;font-weight:700;
-                  color:#00d4ff;letter-spacing:0.12em;">INPT</div>
-      <div style="font-family:'Inter',sans-serif;font-size:0.6rem;color:#2a3a5a;
-                  letter-spacing:0.1em;text-transform:uppercase;margin-top:2px;">
-        Rabat · Morocco
-      </div>
-    </div>
-
-  </div>
-</div>
-""")
-
-# ---------------------------------------------------------------------------
-# ── SECTION 0 — Controller mode explanations
-# ---------------------------------------------------------------------------
-st.html('<div class="sec">Controller Modes</div>')
-
-mc1, mc2, mc3, mc4 = st.columns(4)
-
-def mode_card(widget, icon, name, badge_color, badge_text, description):
-    widget.html(
-        f"""<div class="mode-card"
-                  style="border-top:2px solid {badge_color}40;
-                         box-shadow:inset 0 1px 0 {badge_color}20;">
-              <span class="mode-icon">{icon}</span>
-              <div>
-                <span class="mode-badge"
-                      style="background:{badge_color}14;color:{badge_color};
-                             border:1px solid {badge_color}35;">
-                  {badge_text}
-                </span>
-              </div>
-              <div class="mode-name" style="color:{badge_color};">{name}</div>
-              <div class="mode-desc">{description}</div>
-            </div>"""
+    fig.update_yaxes(
+        gridcolor="rgba(148,163,184,0.09)",
+        zeroline=False,
+        linecolor="rgba(148,163,184,0.14)",
+        tickfont=dict(color="#91a4c2"),
+        title_font=dict(color="#9fb1d0", size=11),
+        title_standoff=12,
     )
-
-mode_card(mc1, "⏱️", "Fixed Cycle",
-    C_FIXED, "BASELINE",
-    "Runs a rigid 30 s green / 5 s yellow cycle at all 3 intersections "
-    "simultaneously. No awareness of traffic demand. Simple, predictable, "
-    "but inefficient during uneven load or peak hours.")
-
-mode_card(mc2, "🧠", "Smart Adaptive",
-    C_SMART, "PRESSURE-BASED",
-    "Measures per-intersection pressure (vehicle count + waiting time) every "
-    "second. Switches green to the most congested axis when pressure ratio "
-    "exceeds 1.5×. Adds green-wave coordination between intersections.")
-
-mode_card(mc3, "📷", "Vision (Camera AI)",
-    C_VISION, "CAMERA-BASED",
-    "Simulates a YOLO-style overhead camera at each intersection. Detects "
-    "vehicle types, emergency vehicles (confirmed over 3 frames), and night "
-    "mode. Overrides Smart controller decisions based on camera intelligence.")
-
-mode_card(mc4, "🤖", "Q-Learning (RL)",
-    C_RL, "REINFORCEMENT LEARNING",
-    "Tabular Q-learning agent trained over 50+ simulation episodes. State "
-    "encodes binned vehicle count and waiting time per axis. Reward is "
-    "negative total waiting time with +50 bonus for clearing emergencies.")
-
-st.html("<br>")
-
-# ---------------------------------------------------------------------------
-# Guard — need at least Fixed + Smart to proceed
-# ---------------------------------------------------------------------------
-if not both:
-    missing = []
-    if fixed is None: missing.append("`data/results_fixed.csv`")
-    if smart is None: missing.append("`data/results_smart.csv`")
-    st.warning(
-        f"**Missing result files:** {', '.join(missing)}. "
-        "Use the **Run Simulation** panel in the sidebar to generate them."
-    )
-    st.stop()
-
-# ---------------------------------------------------------------------------
-# Pre-compute KPIs
-# ---------------------------------------------------------------------------
-avg_wait_f = safe_mean(col(fixed,  "total_waiting_time"))
-avg_wait_s = safe_mean(col(smart,  "total_waiting_time"))
-avg_wait_v = safe_mean(col(vision, "total_waiting_time")) if vision_avail else None
-avg_wait_r = safe_mean(col(rl,     "total_waiting_time")) if rl_avail     else None
-
-pct_s = pct_change(avg_wait_s, avg_wait_f)
-pct_v = pct_change(avg_wait_v, avg_wait_f) if avg_wait_v is not None else None
-pct_r = pct_change(avg_wait_r, avg_wait_f) if avg_wait_r is not None else None
-
-peak_q_f = safe_max(total_queue(fixed))
-peak_q_s = safe_max(total_queue(smart))
-peak_q_v = safe_max(total_queue(vision)) if vision_avail else None
-peak_q_r = safe_max(total_queue(rl))     if rl_avail     else None
-
-emg_steps_f = sum(1 for v in col(fixed,  "emergency_count") if isinstance(v, (int,float)) and v > 0)
-emg_steps_s = sum(1 for v in col(smart,  "emergency_count") if isinstance(v, (int,float)) and v > 0)
-emg_steps_v = sum(1 for v in col(vision, "emergency_count") if isinstance(v, (int,float)) and v > 0) if vision_avail else None
-emg_steps_r = sum(1 for v in col(rl,     "emergency_count") if isinstance(v, (int,float)) and v > 0) if rl_avail     else None
-
-# ---------------------------------------------------------------------------
-# ── SECTION 1 — KPI cards
-# ---------------------------------------------------------------------------
-st.html('<div class="sec">Key Performance Indicators</div>')
-
-k1, k2, k3, k4, k5 = st.columns(5)
-
-def kpi_card(widget, label, value, delta_html, delta_cls, accent=C_TEXT):
-    glow = accent.replace("#", "")
-    r = int(glow[0:2], 16) if len(glow) >= 6 else 0
-    g = int(glow[2:4], 16) if len(glow) >= 6 else 212
-    b = int(glow[4:6], 16) if len(glow) >= 6 else 255
-    widget.html(
-        f"""<div class="kpi-card"
-                  style="--ka:{accent}aa;--ka-glow:rgba({r},{g},{b},0.10);">
-              <div class="kpi-label">{label}</div>
-              <div class="kpi-value" style="color:{accent};">{value}</div>
-              <div class="kpi-delta {delta_cls}">{delta_html}</div>
-            </div>"""
-    )
-
-_fixed_delta = (
-    f'<span style="color:{C_FIXED};font-family:\'Space Mono\',monospace;">●</span>'
-    f'&nbsp; baseline reference'
-    + (f' &nbsp;<span style="color:#f59e0b;font-size:0.65rem;">⚠ Partial data ({fixed_rows} rows)</span>'
-       if fixed_partial else "")
-)
-kpi_card(k1,
-    "Avg Waiting — Fixed",
-    f"{avg_wait_f:,.1f} s",
-    _fixed_delta,
-    "muted", C_FIXED,
-)
-
-s_lbl, s_cls = delta_label(pct_s)
-kpi_card(k2,
-    "Avg Waiting — Smart",
-    f"{avg_wait_s:,.1f} s",
-    s_lbl, s_cls, C_SMART,
-)
-
-if vision_avail and pct_v is not None:
-    v_lbl, v_cls = delta_label(pct_v)
-    kpi_card(k3,
-        "Avg Waiting — Vision",
-        f"{avg_wait_v:,.1f} s",
-        v_lbl, v_cls, C_VISION,
-    )
-else:
-    kpi_card(k3,
-        "Avg Waiting — Vision",
-        "—",
-        "Run Vision simulation to compare",
-        "muted", C_VISION,
-    )
-
-candidates = [("Smart", avg_wait_s, pct_s, C_SMART)]
-if vision_avail and pct_v is not None:
-    candidates.append(("Vision", avg_wait_v, pct_v, C_VISION))
-if rl_avail and pct_r is not None:
-    candidates.append(("RL", avg_wait_r, pct_r, C_RL))
-best_name, best_wait, best_pct, best_col = max(candidates, key=lambda x: x[2])
-
-kpi_card(k4,
-    "Best Controller",
-    best_name,
-    f"▼ {best_pct:.1f}% less waiting vs Fixed",
-    "good", best_col,
-)
-
-if rl_avail and pct_r is not None:
-    r_lbl, r_cls = delta_label(pct_r)
-    kpi_card(k5,
-        "Avg Waiting — RL",
-        f"{avg_wait_r:,.1f} s",
-        r_lbl, r_cls, C_RL,
-    )
-else:
-    kpi_card(k5,
-        "Avg Waiting — RL",
-        "—",
-        "Run RL simulation to compare",
-        "muted", C_RL,
-    )
-
-st.html("<br>")
-
-# ---------------------------------------------------------------------------
-# ── SECTION 2 — Summary Insights
-# ---------------------------------------------------------------------------
-st.html('<div class="sec">Summary Insights</div>')
-
-i1, i2, i3 = st.columns(3)
-
-def insight_card(widget, icon, title, stat, stat_color, body):
-    widget.html(
-        f"""<div class="insight-card"
-                  style="border-top:2px solid {stat_color}35;
-                         box-shadow:inset 0 1px 0 {stat_color}18;">
-              <span class="insight-icon">{icon}</span>
-              <div class="insight-title">{title}</div>
-              <div class="insight-stat" style="color:{stat_color};">{stat}</div>
-              <div class="insight-body">{body}</div>
-            </div>"""
-    )
-
-if vision_avail and pct_v is not None and pct_v > pct_s:
-    best_insight_name  = "Vision"
-    best_insight_wait  = avg_wait_v
-    best_insight_color = C_VISION
-    best_insight_pct   = pct_v
-else:
-    best_insight_name  = "Smart"
-    best_insight_wait  = avg_wait_s
-    best_insight_color = C_SMART
-    best_insight_pct   = pct_s
-
-insight_card(
-    i1, "⏱️", "Waiting Time Reduction",
-    f"{best_insight_pct:.1f}% less waiting",
-    best_insight_color,
-    f"The {best_insight_name} controller cuts average waiting time from "
-    f"<strong style='color:{C_TEXT};'>{avg_wait_f:.1f}s</strong> to "
-    f"<strong style='color:{best_insight_color};'>{best_insight_wait:.1f}s</strong>. "
-    f"Drivers spend significantly less time at red lights because the system "
-    f"reads live traffic demand and adapts the green phase in real time."
-)
-
-q_diff = int(peak_q_f - (peak_q_v if vision_avail and peak_q_v else peak_q_s))
-q_pct  = abs(pct_change(float(peak_q_f - q_diff), peak_q_f))
-insight_card(
-    i2, "🚗", "Queue Length Control",
-    f"{q_pct:.1f}% shorter queues",
-    C_SMART if q_diff >= 0 else C_WARN,
-    f"Peak queue drops from <strong style='color:{C_TEXT};'>{int(peak_q_f)}</strong> to "
-    f"<strong style='color:{C_SMART};'>{int(peak_q_f - q_diff)}</strong> vehicles across all approaches. "
-    f"Shorter queues reduce road spillback, cut fuel consumption, "
-    f"and lower emissions at all three intersections."
-)
-
-emg_note = emg_steps_v if vision_avail and emg_steps_v is not None else emg_steps_s
-insight_card(
-    i3, "🚨", "Emergency Vehicle Handling",
-    f"{emg_note} active steps",
-    C_WARN,
-    f"Across <strong style='color:{C_TEXT};'>{emg_note}</strong> simulation steps an emergency vehicle "
-    f"was present. Smart and Vision controllers detect this in real time and "
-    f"trigger green-axis priority. The fixed controller cannot react — "
-    f"emergency vehicles face the same rigid 30 s cycle as regular traffic."
-)
-
-st.html("<br>")
-
-# ---------------------------------------------------------------------------
-# ── SECTION 3 — Waiting time line chart
-# ---------------------------------------------------------------------------
-st.html('<div class="sec">Total Waiting Time Over Simulation</div>')
-
-t_f  = col(fixed, "sim_time")
-t_s  = col(smart, "sim_time")
-wt_f = rolling_mean(col(fixed, "total_waiting_time"), WINDOW)
-wt_s = rolling_mean(col(smart, "total_waiting_time"), WINDOW)
-
-fig_line = go.Figure()
-fig_line.add_trace(go.Scatter(
-    x=t_f, y=wt_f,
-    name="Fixed",
-    line=dict(color=C_FIXED, width=2.5),
-    hovertemplate="t=%{x:.0f}s<br>wait=%{y:.1f}s<extra>Fixed</extra>",
-))
-fig_line.add_trace(go.Scatter(
-    x=t_s, y=wt_s,
-    name="Smart",
-    line=dict(color=C_SMART, width=2.5),
-    hovertemplate="t=%{x:.0f}s<br>wait=%{y:.1f}s<extra>Smart</extra>",
-))
-if vision_avail:
-    t_v  = col(vision, "sim_time")
-    wt_v = rolling_mean(col(vision, "total_waiting_time"), WINDOW)
-    fig_line.add_trace(go.Scatter(
-        x=t_v, y=wt_v,
-        name="Vision",
-        line=dict(color=C_VISION, width=2.5, dash="dot"),
-        hovertemplate="t=%{x:.0f}s<br>wait=%{y:.1f}s<extra>Vision</extra>",
-    ))
-if rl_avail:
-    t_r  = col(rl, "sim_time")
-    wt_r = rolling_mean(col(rl, "total_waiting_time"), WINDOW)
-    fig_line.add_trace(go.Scatter(
-        x=t_r, y=wt_r,
-        name="RL",
-        line=dict(color=C_RL, width=2.5, dash="dot"),
-        hovertemplate="t=%{x:.0f}s<br>wait=%{y:.1f}s<extra>RL</extra>",
-    ))
-fig_line.update_layout(**{
-    **PLOTLY_BASE,
-    "height": 340,
-    "xaxis_title": "Simulation time (s)",
-    "yaxis_title": "Total waiting time (s)",
-    "legend": LEGEND_H,
-})
-st.plotly_chart(fig_line, use_container_width=True)
-
-# ---------------------------------------------------------------------------
-# ── SECTION 4 — Per-intersection waiting time
-# ---------------------------------------------------------------------------
-st.html('<div class="sec">Per-Intersection Waiting Time</div>')
-
-INT_COLS = [("int_A", "intA_wait", C_FIXED),
-            ("int_B", "intB_wait", C_SMART),
-            ("int_C", "intC_wait", C_RL)]
-
-fig_int = go.Figure()
-for ds, ds_name, ds_color in [(fixed, "Fixed", C_FIXED),
-                               (smart, "Smart", C_SMART)] + (
-                              [(vision, "Vision", C_VISION)] if vision_avail else []) + (
-                              [(rl, "RL", C_RL)] if rl_avail else []):
-    for int_id, int_col_key, int_color in INT_COLS:
-        raw = col(ds, int_col_key)
-        if not raw:
-            continue
-        smoothed = rolling_mean(raw, WINDOW)
-        t_ds = col(ds, "sim_time")
-        fig_int.add_trace(go.Scatter(
-            x=t_ds, y=smoothed,
-            name=f"{ds_name} – {int_id}",
-            line=dict(
-                color=int_color, width=1.8,
-                dash="solid" if ds_name == "Fixed"
-                     else ("dash" if ds_name == "Smart"
-                     else ("dot" if ds_name == "Vision" else "dashdot")),
-            ),
-            hovertemplate=f"{ds_name} {int_id}: %{{y:.1f}}s<extra></extra>",
-        ))
-fig_int.update_layout(**{
-    **PLOTLY_BASE,
-    "height": 300,
-    "xaxis_title": "Simulation time (s)",
-    "yaxis_title": "Waiting time (s)",
-    "legend": LEGEND_H,
-})
-st.plotly_chart(fig_int, use_container_width=True)
-
-# ---------------------------------------------------------------------------
-# ── SECTION 5 — Peak queue bar chart
-# ---------------------------------------------------------------------------
-st.html('<div class="sec">Peak Queue Length by Approach</div>')
-
-approaches  = ["North", "South", "East", "West"]
-q_cols      = ["queue_north", "queue_south", "queue_east", "queue_west"]
-peak_f_bars = [int(safe_max(col(fixed, c))) for c in q_cols]
-peak_s_bars = [int(safe_max(col(smart, c))) for c in q_cols]
-
-fig_bar = go.Figure()
-fig_bar.add_trace(go.Bar(
-    name="Fixed", x=approaches, y=peak_f_bars,
-    marker_color=C_FIXED,
-    marker_line=dict(width=0),
-    text=peak_f_bars, textposition="outside",
-    textfont=dict(color=C_TEXT, size=12, family="'Space Mono', monospace"),
-))
-fig_bar.add_trace(go.Bar(
-    name="Smart", x=approaches, y=peak_s_bars,
-    marker_color=C_SMART,
-    marker_line=dict(width=0),
-    text=peak_s_bars, textposition="outside",
-    textfont=dict(color=C_TEXT, size=12, family="'Space Mono', monospace"),
-))
-if vision_avail:
-    peak_v_bars = [int(safe_max(col(vision, c))) for c in q_cols]
-    fig_bar.add_trace(go.Bar(
-        name="Vision", x=approaches, y=peak_v_bars,
-        marker_color=C_VISION,
-        marker_line=dict(width=0),
-        text=peak_v_bars, textposition="outside",
-        textfont=dict(color=C_TEXT, size=12, family="'Space Mono', monospace"),
-    ))
-if rl_avail:
-    peak_r_bars = [int(safe_max(col(rl, c))) for c in q_cols]
-    fig_bar.add_trace(go.Bar(
-        name="RL", x=approaches, y=peak_r_bars,
-        marker_color=C_RL,
-        marker_line=dict(width=0),
-        text=peak_r_bars, textposition="outside",
-        textfont=dict(color=C_TEXT, size=12, family="'Space Mono', monospace"),
-    ))
-fig_bar.update_layout(**{
-    **PLOTLY_BASE,
-    "height": 320,
-    "barmode": "group",
-    "bargap": 0.22,
-    "bargroupgap": 0.06,
-    "xaxis_title": "Approach (int_B)",
-    "yaxis_title": "Vehicles queued (peak)",
-    "legend": LEGEND_H,
-})
-st.plotly_chart(fig_bar, use_container_width=True)
-
-# ---------------------------------------------------------------------------
-# ── SECTION 6 — Per-approach area charts
-# ---------------------------------------------------------------------------
-st.html('<div class="sec">Per-Approach Waiting Time Breakdown</div>')
-
-APPROACH_WAIT = [
-    ("North", "north_wait"),
-    ("South", "south_wait"),
-    ("East",  "east_wait"),
-    ("West",  "west_wait"),
-]
-
-def make_area(d: dict, title: str) -> go.Figure:
-    fig = go.Figure()
-    t = col(d, "sim_time")
-    for i, (label, key) in enumerate(APPROACH_WAIT):
-        smoothed = rolling_mean(col(d, key), WINDOW)
-        fig.add_trace(go.Scatter(
-            x=t, y=smoothed,
-            name=label,
-            stackgroup="one",
-            line=dict(width=0.8, color=AREA_COLOURS[i]),
-            fillcolor=AREA_FILL_COLOURS[i],
-            hovertemplate=f"{label}: %{{y:.1f}}s<extra></extra>",
-        ))
-    fig.update_layout(**{
-        **PLOTLY_BASE,
-        "height": 270,
-        "title": dict(text=title, font=dict(
-            size=12, color=C_TEXT, family="'Space Mono', monospace")),
-        "xaxis_title": "Simulation time (s)",
-        "yaxis_title": "Waiting time (s)",
-        "legend": LEGEND_H,
-        "margin": dict(l=48, r=16, t=54, b=44),
-    })
     return fig
 
-if vision_avail and rl_avail:
-    a1, a2, a3, a4 = st.columns(4)
-    with a1: st.plotly_chart(make_area(fixed,  "Fixed"),  use_container_width=True)
-    with a2: st.plotly_chart(make_area(smart,  "Smart"),  use_container_width=True)
-    with a3: st.plotly_chart(make_area(vision, "Vision"), use_container_width=True)
-    with a4: st.plotly_chart(make_area(rl,     "RL"),     use_container_width=True)
-elif vision_avail:
-    a1, a2, a3 = st.columns(3)
-    with a1: st.plotly_chart(make_area(fixed,  "Fixed"),  use_container_width=True)
-    with a2: st.plotly_chart(make_area(smart,  "Smart"),  use_container_width=True)
-    with a3: st.plotly_chart(make_area(vision, "Vision"), use_container_width=True)
-elif rl_avail:
-    a1, a2, a3 = st.columns(3)
-    with a1: st.plotly_chart(make_area(fixed, "Fixed"), use_container_width=True)
-    with a2: st.plotly_chart(make_area(smart, "Smart"), use_container_width=True)
-    with a3: st.plotly_chart(make_area(rl,    "RL"),    use_container_width=True)
-else:
-    a1, a2 = st.columns(2)
-    with a1: st.plotly_chart(make_area(fixed, "Fixed"), use_container_width=True)
-    with a2: st.plotly_chart(make_area(smart, "Smart"), use_container_width=True)
 
-# ---------------------------------------------------------------------------
-# ── SECTION 6b — Intersection Diagram
-# ---------------------------------------------------------------------------
-st.html('<div class="sec">Live Intersection View</div>')
+def section_title(title: str, detail: str | None = None) -> None:
+    suffix = f"<span>{escape_text(detail)}</span>" if detail else ""
+    st.markdown(f'<div class="section-title">{escape_text(title)}{suffix}</div>', unsafe_allow_html=True)
 
-_best = rl if rl_avail else (vision if vision_avail else smart)
-_diag_cols = st.columns([1, 2, 1])
-with _diag_cols[1]:
-    render_intersection(
-        width=420,
-        north_wait=safe_mean(col(_best, "north_wait")),
-        south_wait=safe_mean(col(_best, "south_wait")),
-        east_wait =safe_mean(col(_best, "east_wait")),
-        west_wait =safe_mean(col(_best, "west_wait")),
+
+def subsection_label(label: str) -> None:
+    st.markdown(f'<div class="subsection-label">{escape_text(label)}</div>', unsafe_allow_html=True)
+
+
+def chart_caption(text: str) -> None:
+    st.markdown(f'<div class="chart-caption">{escape_text(text)}</div>', unsafe_allow_html=True)
+
+
+def metric_card(
+    label: str,
+    value: str,
+    unit: str,
+    delta: str,
+    accent: str,
+    delta_color: str = "#8fa0bd",
+    tag: str = "",
+) -> str:
+    tag_markup = f'<div class="kpi-tag">{escape_text(tag)}</div>' if tag else ""
+    return (
+        f'<div class="kpi-card" style="--accent:{accent};--accent-soft:{hex_to_rgba(accent, 0.24)};--delta:{delta_color};">'
+        f'<div class="kpi-header"><div class="kpi-label">{escape_text(label)}</div>{tag_markup}</div>'
+        f'<div class="kpi-value">{escape_text(value)}</div>'
+        f'<div class="kpi-unit">{escape_text(unit)}</div>'
+        f'<div class="kpi-delta">{escape_text(delta)}</div></div>'
     )
 
-# ---------------------------------------------------------------------------
-# ── SECTION 7 — Camera Intelligence
-# ---------------------------------------------------------------------------
-st.html('<div class="sec-vision">📷 Camera Intelligence Report</div>')
 
-if not vision_avail:
-    st.info(
-        "Camera intelligence data is not yet available. "
-        "Run a **Vision** simulation from the sidebar to populate this section."
+def insight_card(label: str, stat: str, body: str, accent: str) -> str:
+    return (
+        f'<div class="insight-card" style="--accent:{accent};">'
+        f'<div class="card-label">{escape_text(label)}</div>'
+        f'<div class="insight-stat">{escape_text(stat)}</div>'
+        f'<div class="insight-body">{escape_text(body)}</div></div>'
     )
-else:
-    reason_col = col(vision, "controller_reason")
 
-    override_counts = {}
-    for tl in ("int_A", "int_B", "int_C"):
-        override_counts[tl] = sum(
-            1 for r in reason_col
-            if isinstance(r, str) and "camera_emg" in r and tl in r
+
+def story_panel(title: str, body: str) -> str:
+    return (
+        '<div class="story-panel">'
+        f'<div class="story-title">{escape_text(title)}</div>'
+        f'<div class="story-body">{escape_text(body)}</div></div>'
+    )
+
+
+def status_card(result: ResultSet) -> str:
+    if result.error:
+        status, cls, meta = "Error", "status-warn", result.error
+    elif result.found and result.row_count:
+        status, cls, meta = "Loaded", "status-ok", f"{result.row_count:,} rows · {result.column_count} columns"
+    elif result.path.exists():
+        status, cls, meta = "Empty", "status-warn", f"Found {result.path.name}, but no rows were parsed"
+    else:
+        status, cls, meta = "Missing", "status-warn", f"Expected data/{result.path.name}"
+    return (
+        '<div class="status-card">'
+        f'<div class="card-label">{escape_text(result.label)}</div>'
+        f'<div class="status-card-value {cls}">{escape_text(status)}</div>'
+        f'<div class="status-card-meta">{escape_text(meta)}</div></div>'
+    )
+
+
+def render_comparison_table(metrics: dict[str, dict[str, object]]) -> None:
+    best_wait = best_by_metric(metrics, "avg_wait")
+    worst_wait = best_by_metric(metrics, "avg_wait", higher_is_better=True)
+    rows: list[str] = []
+    for key in CONTROLLERS:
+        label = str(CONTROLLERS[key]["label"])
+        metric = metrics.get(label)
+        if not metric:
+            continue
+        badge = "Loaded"
+        badge_cls = ""
+        if best_wait and label == best_wait[0]:
+            badge, badge_cls = "Best", " best"
+        elif worst_wait and label == worst_wait[0] and best_wait and worst_wait[0] != best_wait[0]:
+            badge, badge_cls = "Watch", " watch"
+        rows.append(
+            "<tr><td><span class=\"compare-name\">"
+            f"<span class=\"compare-dot\" style=\"background:{metric['color']}; color:{metric['color']};\"></span>"
+            f"{escape_text(label)}</span></td>"
+            f"<td>{escape_text(fmt_value(metric.get('avg_wait'), 2))}</td>"
+            f"<td>{escape_text(fmt_value(metric.get('peak_queue'), 0))}</td>"
+            f"<td>{escape_text(fmt_value(metric.get('throughput'), 0))}</td>"
+            f"<td><span class=\"compare-badge{badge_cls}\">{escape_text(badge)}</span></td></tr>"
         )
-    total_override_steps = sum(
-        1 for r in reason_col
-        if isinstance(r, str) and "camera_emg" in r
+    table_html = (
+        '<div class="compare-card"><table class="compare-table"><thead><tr>'
+        "<th>Controller</th><th>Avg wait</th><th>Peak queue</th><th>Flow</th><th>Read</th>"
+        f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
     )
+    st.markdown(table_html, unsafe_allow_html=True)
 
-    night_steps = sum(
-        1 for v in col(vision, "total_vehicles")
-        if isinstance(v, (int, float)) and v < 5
-    )
 
-    intA_v = col(vision, "intA_wait")
-    intB_v = col(vision, "intB_wait")
-    intC_v = col(vision, "intC_wait")
-    congestion_steps = sum(
-        1 for a, b, c in zip(intA_v, intB_v, intC_v)
-        if isinstance(a, (int, float)) and isinstance(b, (int, float))
-           and isinstance(c, (int, float)) and a + b + c > 500
-    )
+# ---------------------------------------------------------------------------
+# Render sections
+# ---------------------------------------------------------------------------
 
-    cam_left, cam_right = st.columns([2, 3])
+def render_sidebar(results: dict[str, ResultSet], metrics: dict[str, dict[str, object]]) -> str:
+    with st.sidebar:
+        identity_html = (
+            '<div class="sb-card identity"><div class="sb-identity"><div class="sb-logo">🚦</div><div>'
+            '<div class="sb-title">AI TRAFFIC BRAIN</div><div class="sb-sub">Smart City Command Center</div>'
+            '</div></div><div class="sb-online"><span class="sb-online-dot"></span>SYSTEM ONLINE</div></div>'
+        )
+        st.markdown(identity_html, unsafe_allow_html=True)
 
-    with cam_left:
-        st.html("""
-        <div style="font-family:'Space Mono',monospace;font-size:0.62rem;color:#3a2a6a;
-                    text-transform:uppercase;letter-spacing:0.12em;margin-bottom:14px;">
-          Camera Event Summary
-        </div>""")
+        project_info_html = (
+            '<div class="sb-card"><div class="sb-card-title">Project Information</div>'
+            '<div class="sb-label">Project Team</div>'
+            '<div class="sb-value strong">ACHAAR Mohammed Amine</div>'
+            '<div class="sb-value strong">ZAKANE Mohamed</div>'
+            '<div class="sb-label" style="margin-top:10px;">Supervisor</div>'
+            '<div class="sb-value strong">Dr. EN-NOUAARY ABDELSLAM</div>'
+            '<div class="sb-label" style="margin-top:10px;">Institution</div>'
+            '<div class="sb-value">Institut National des Postes et Télécommunications</div>'
+            '<div class="sb-accent">INPT · Rabat, Morocco</div></div>'
+        )
+        st.markdown(project_info_html, unsafe_allow_html=True)
 
-        cm1, cm2, cm3 = st.columns(3)
-        for widget, label, value, sub in [
-            (cm1, "Override Steps",   total_override_steps, "emergency holds"),
-            (cm2, "Night Mode Steps", night_steps,          "&lt;5 vehicles"),
-            (cm3, "Congestion Steps", congestion_steps,     "wait &gt;500 s"),
-        ]:
-            widget.html(
-                f"""<div class="cam-card">
-                      <div class="cam-label">{label}</div>
-                      <div class="cam-value">{value:,}</div>
-                      <div class="cam-sub">{sub}</div>
-                    </div>"""
+        with st.container(border=True):
+            st.markdown('<div class="sb-card-title">Controls</div>', unsafe_allow_html=True)
+            st.markdown('<div class="sb-label">Dashboard focus</div>', unsafe_allow_html=True)
+            focus_options = ["Auto: Best Controller"] + list(metrics.keys())
+            selected_focus = st.selectbox("Controller focus", options=focus_options, label_visibility="collapsed")
+            focus = "Best available" if selected_focus == "Auto: Best Controller" else selected_focus
+
+            st.markdown('<div class="sb-label">Simulation mode</div>', unsafe_allow_html=True)
+            mode_labels = {
+                "fixed": "Fixed cycle",
+                "smart": "Smart adaptive",
+                "vision": "Vision camera AI",
+                "rl": "Q-learning AI",
+            }
+            sim_mode = st.selectbox(
+                "Simulation mode",
+                options=list(mode_labels.keys()),
+                format_func=lambda mode: mode_labels[mode],
+                label_visibility="collapsed",
+                key="sidebar_sim_mode",
             )
+            gui_flag = st.checkbox("Open SUMO GUI", value=False, key="sidebar_sumo_gui")
 
-        st.html("<br>")
-        reason_counts: dict[str, int] = {}
-        for r in reason_col:
-            if not isinstance(r, str):
-                continue
-            key = r.split("(")[0]
-            reason_counts[key] = reason_counts.get(key, 0) + 1
+            if st.button("Run Simulation", use_container_width=True, type="primary"):
+                cmd = [sys.executable, str(ROOT / "main.py"), "--mode", sim_mode]
+                if gui_flag:
+                    cmd.append("--gui")
+                status_box = st.empty()
+                with st.spinner(f"Running {mode_labels[sim_mode]} simulation..."):
+                    try:
+                        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
+                    except FileNotFoundError:
+                        status_box.error("main.py was not found. Check the project root path.")
+                    except Exception as exc:
+                        status_box.error(f"Simulation could not start: {type(exc).__name__}: {exc}")
+                    else:
+                        if result.returncode == 0:
+                            status_box.success(f"{mode_labels[sim_mode]} simulation complete.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            details = (result.stderr or result.stdout or "No process output was captured.")[-2000:]
+                            status_box.error("Simulation failed. See details below.")
+                            st.code(details, language="bash")
 
-        sorted_reasons = sorted(reason_counts.items(), key=lambda x: -x[1])[:8]
+        st.markdown('<div class="sb-footer"><div>Academic Project</div><div>2025–2026</div></div>', unsafe_allow_html=True)
+    return focus
 
-        html = """<table class="emg-tbl">
-          <thead><tr>
-            <th>Control Reason</th>
-            <th style="text-align:right;">Steps</th>
-          </tr></thead><tbody>"""
-        for reason, count in sorted_reasons:
-            is_cam = "camera" in reason
-            color  = C_VISION if is_cam else C_SUBTEXT
-            html += (
-                f"<tr><td style='color:{color};"
-                f"font-family:\"Space Mono\",monospace;font-size:0.76rem;'>"
-                f"{reason}</td>"
-                f"<td style='text-align:right;font-weight:700;"
-                f"font-family:\"Space Mono\",monospace;color:{C_TEXT};'>{count:,}</td></tr>"
+
+def render_header(metrics: dict[str, dict[str, object]]) -> None:
+    best = best_by_metric(metrics, "avg_wait")
+    fixed = metrics.get("Fixed")
+    loaded_count = len(metrics)
+    if best:
+        best_label, best_metric = best
+        improvement = pct_lower(as_float(best_metric.get("avg_wait")), as_float(fixed.get("avg_wait")) if fixed else None)
+        improvement_text, _ = format_delta(improvement, "lower")
+        verdict = best_label
+        detail = improvement_text if improvement is not None else "Awaiting fixed baseline"
+    else:
+        verdict = "Awaiting Data"
+        detail = "Load result CSVs to compute the winner"
+
+    st.markdown(
+        f"""
+        <div class="hero">
+            <div>
+                <div class="hero-kicker">Executive verdict</div>
+                <h1 class="hero-title">AI Traffic Brain</h1>
+                <div class="hero-subtitle">Intelligent Urban Traffic Management System</div>
+                <div class="badge-row">
+                    <span class="badge">SUMO Simulation</span>
+                    <span class="badge">Adaptive Control</span>
+                    <span class="badge">RL Policy Review</span>
+                </div>
+                <div class="hero-meta">{loaded_count}/4 controller result files loaded · Decision metric: lowest average waiting time</div>
+            </div>
+            <div class="verdict-card">
+                <div class="verdict-label">Best Controller</div>
+                <div class="verdict-value">{escape_text(verdict)}</div>
+                <div class="verdict-delta">{escape_text(detail)}</div>
+                <div class="verdict-note">Queue pressure, throughput, and RL signals are reviewed below for operational context.</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpi_cards(metrics: dict[str, dict[str, object]]) -> None:
+    section_title("KPI Overview", "best and worst controller signals")
+    if not metrics:
+        st.warning("No result data loaded yet. Expected CSV files in the data/ directory.")
+        return
+    fixed = metrics.get("Fixed")
+    best_wait = best_by_metric(metrics, "avg_wait")
+    worst_wait = best_by_metric(metrics, "avg_wait", higher_is_better=True)
+    best_queue = best_by_metric(metrics, "peak_queue")
+    best_throughput = best_by_metric(metrics, "throughput", higher_is_better=True)
+    cols = st.columns(4)
+
+    if best_wait:
+        label, metric = best_wait
+        delta, color = format_delta(pct_lower(as_float(metric.get("avg_wait")), as_float(fixed.get("avg_wait")) if fixed else None), "lower")
+        cols[0].markdown(
+            metric_card("Best delay", fmt_value(metric.get("avg_wait"), 2), f"{label} · lowest {metric.get('avg_wait_unit', 's')}", delta, str(metric["color"]), color, "Best"),
+            unsafe_allow_html=True,
+        )
+    if worst_wait:
+        label, metric = worst_wait
+        best_value = as_float(best_wait[1].get("avg_wait")) if best_wait else None
+        gap = pct_higher(as_float(metric.get("avg_wait")), best_value)
+        delta, color = ("No spread detected", "#8fa0bd") if gap is None or label == (best_wait[0] if best_wait else "") else (f"{gap:.1f}% higher than best", "#ff9f1c")
+        cols[1].markdown(
+            metric_card("Highest delay", fmt_value(metric.get("avg_wait"), 2), f"{label} · watch {metric.get('avg_wait_unit', 's')}", delta, str(metric["color"]), color, "Watch"),
+            unsafe_allow_html=True,
+        )
+    if best_queue:
+        label, metric = best_queue
+        delta, color = format_delta(pct_lower(as_float(metric.get("peak_queue")), as_float(fixed.get("peak_queue")) if fixed else None), "lower")
+        cols[2].markdown(metric_card("Queue control", fmt_value(metric.get("peak_queue"), 0), f"{label} · lowest peak queue", delta, str(metric["color"]), color, "Best"), unsafe_allow_html=True)
+    if best_throughput:
+        label, metric = best_throughput
+        delta, color = format_delta(pct_higher(as_float(metric.get("throughput")), as_float(fixed.get("throughput")) if fixed else None), "higher")
+        cols[3].markdown(
+            metric_card("Flow leader", fmt_value(metric.get("throughput"), 0), f"{label} · {metric.get('throughput_source', 'vehicles')}", delta, str(metric["color"]), color, "Best"),
+            unsafe_allow_html=True,
+        )
+
+
+def render_controller_comparison(metrics: dict[str, dict[str, object]]) -> None:
+    if not metrics:
+        return
+    section_title("Controller Comparison", "delay, queue, and flow scorecard")
+    left, right = st.columns([1.55, 1])
+    labels = list(metrics.keys())
+    colors = [str(metrics[label]["color"]) for label in labels]
+    avg_waits = [as_float(metrics[label].get("avg_wait")) for label in labels]
+
+    with left:
+        fig = go.Figure()
+        fig.add_trace(
+            go.Bar(
+                x=labels,
+                y=avg_waits,
+                marker=dict(color=colors, line=dict(color="rgba(255,255,255,0.22)", width=1)),
+                text=[fmt_value(value, 2) for value in avg_waits],
+                textposition="outside",
+                cliponaxis=False,
+                hovertemplate="<b>%{x}</b><br>Average waiting time: %{y:.3f}s<extra></extra>",
             )
-        html += "</tbody></table>"
-        st.html(html)
+        )
+        apply_plot_theme(fig, height=344, showlegend=False)
+        fig.update_layout(
+            title=dict(text="Average Delay by Controller", font=dict(size=15, color="#f0f7ff", family="Space Mono"), x=0),
+            yaxis_title="Average waiting time",
+            xaxis_title="Controller",
+            bargap=0.42,
+        )
+        st.plotly_chart(fig, width="stretch")
+        chart_caption("Lower bars indicate a controller that clears vehicles with less accumulated delay.")
+    with right:
+        render_comparison_table(metrics)
+        chart_caption("Best and watch labels are based on average waiting time.")
 
-    with cam_right:
-        fig_ovr = go.Figure()
-        tl_labels = ["int_A (West)", "int_B (Centre)", "int_C (East)"]
-        ovr_vals  = [override_counts.get(tl, 0) for tl in ("int_A", "int_B", "int_C")]
-        bar_colors = [
-            C_VISION if v > 0 else "rgba(255,255,255,0.06)"
-            for v in ovr_vals
-        ]
-        fig_ovr.add_trace(go.Bar(
-            x=tl_labels,
-            y=ovr_vals,
-            marker_color=bar_colors,
-            marker_line=dict(width=0),
-            text=ovr_vals,
-            textposition="outside",
-            textfont=dict(color=C_TEXT, size=13, family="'Space Mono', monospace"),
-            hovertemplate="%{x}<br>Override steps: %{y}<extra></extra>",
-        ))
-        fig_ovr.update_layout(**{
-            **PLOTLY_BASE,
-            "height": 280,
-            "title": dict(
-                text="Emergency Override Steps per Intersection",
-                font=dict(size=12, color=C_TEXT, family="'Space Mono', monospace"),
-            ),
-            "xaxis_title": "Intersection",
-            "yaxis_title": "Steps in camera override",
-            "showlegend": False,
-        })
-        st.plotly_chart(fig_ovr, use_container_width=True)
 
-        t_vis   = col(vision, "sim_time")
-        veh_vis = col(vision, "total_vehicles")
-        wt_vis  = [a + b + c for a, b, c in zip(intA_v, intB_v, intC_v)]
+def render_waiting_time_chart(metrics: dict[str, dict[str, object]], *, focus_controller: str) -> None:
+    if not metrics:
+        return
+    section_title("Traffic Evolution Over Time", "smoothed waiting-load timeline")
+    best = best_by_metric(metrics, "avg_wait")
+    highlight = best[0] if focus_controller == "Best available" and best else focus_controller
+    fig = go.Figure()
+    trace_count = 0
+    for label, metric in metrics.items():
+        x_values = metric.get("time_series") or []
+        y_values = metric.get("total_wait_series") or []
+        if not y_values:
+            continue
+        window = max(5, min(24, len(y_values) // 180 or 5))
+        is_focus = label == highlight
+        fig.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=rolling_mean(list(y_values), window),
+                mode="lines",
+                name=label,
+                line=dict(color=str(metric["color"]), width=4 if is_focus else 2.4),
+                opacity=0.98 if is_focus else 0.62,
+                hovertemplate=f"<b>{label}</b><br>Time: %{{x:.0f}}s<br>Smoothed total wait: %{{y:.1f}}s<extra></extra>",
+            )
+        )
+        trace_count += 1
+    if trace_count == 0:
+        st.info("No total waiting-time column was detected in the loaded CSV files.")
+        return
+    apply_plot_theme(fig, height=410, showlegend=True)
+    fig.update_layout(
+        title=dict(text="Waiting Load Across the Simulation", font=dict(size=15, color="#f0f7ff", family="Space Mono"), x=0),
+        xaxis_title="Simulation time (seconds)",
+        yaxis_title="Total waiting time (seconds)",
+    )
+    st.plotly_chart(fig, width="stretch")
+    chart_caption("The selected focus controller is drawn with the strongest line; other controllers remain visible for context.")
 
-        if t_vis and veh_vis:
-            fig_cam = go.Figure()
-            fig_cam.add_trace(go.Scatter(
-                x=t_vis,
-                y=rolling_mean([v if isinstance(v, (int,float)) else 0 for v in veh_vis], WINDOW),
-                name="Total vehicles",
-                line=dict(color=C_VISION, width=2),
-                hovertemplate="t=%{x:.0f}s<br>vehicles=%{y:.1f}<extra></extra>",
-            ))
-            fig_cam.add_trace(go.Scatter(
-                x=t_vis,
-                y=rolling_mean([w if isinstance(w, (int,float)) else 0 for w in wt_vis], WINDOW),
-                name="Total wait (3 nodes)",
-                line=dict(color=C_WARN, width=2, dash="dash"),
-                yaxis="y2",
-                hovertemplate="t=%{x:.0f}s<br>wait=%{y:.1f}s<extra></extra>",
-            ))
-            fig_cam.update_layout(**{
-                **PLOTLY_BASE,
-                "height": 230,
-                "title": dict(
-                    text="Vehicle Density & Waiting (Vision)",
-                    font=dict(size=11, color=C_TEXT, family="'Space Mono', monospace"),
-                ),
-                "xaxis_title": "Simulation time (s)",
-                "yaxis":  {**PLOTLY_BASE["yaxis"], "title": "Vehicles"},
-                "yaxis2": dict(
-                    overlaying="y", side="right",
-                    showgrid=False,
-                    zerolinecolor="rgba(255,255,255,0.06)",
-                    title=dict(text="Waiting (s)",
-                               font=dict(color=C_WARN, family="'Space Mono', monospace")),
-                    tickfont=dict(color=C_WARN, family="'Space Mono', monospace"),
-                ),
-                "legend": LEGEND_H,
-            })
-            st.plotly_chart(fig_cam, use_container_width=True)
 
-st.html("<br>")
+def render_intersection_breakdown(results: dict[str, ResultSet], metrics: dict[str, dict[str, object]]) -> None:
+    loaded = ordered_loaded_results(results)
+    if not loaded:
+        return
+    has_intersection_data = any(find_column(result, aliases) for result in loaded for _, aliases in INTERSECTION_WAIT_COLS)
+    has_approach_data = any(find_column(result, aliases) for result in loaded for _, aliases in APPROACH_WAIT_COLS)
+    if not has_intersection_data and not has_approach_data:
+        return
+
+    subsection_label("Intersection delay split")
+    if has_intersection_data:
+        fig = go.Figure()
+        x_labels = [name for name, _ in INTERSECTION_WAIT_COLS]
+        for result in loaded:
+            y_values = [safe_mean(get_series(result, aliases)) for _, aliases in INTERSECTION_WAIT_COLS]
+            if any(value is not None for value in y_values):
+                fig.add_trace(
+                    go.Bar(
+                        name=result.label,
+                        x=x_labels,
+                        y=y_values,
+                        marker_color=result.color,
+                        hovertemplate="<b>%{fullData.name}</b><br>%{x}: %{y:.2f}s average wait<extra></extra>",
+                    )
+                )
+        apply_plot_theme(fig, height=322, showlegend=True)
+        fig.update_layout(
+            title=dict(text="Average Wait by Intersection", font=dict(size=14, color="#f0f7ff", family="Space Mono"), x=0),
+            barmode="group",
+            bargap=0.22,
+            xaxis_title="Intersection",
+            yaxis_title="Average waiting time (s)",
+        )
+        st.plotly_chart(fig, width="stretch")
+        chart_caption("Grouped bars reveal whether delay is concentrated around a specific intersection.")
+        return
+
+    controllers: list[str] = []
+    z_values: list[list[float | None]] = []
+    for result in loaded:
+        row = [safe_mean(get_series(result, aliases)) for _, aliases in APPROACH_WAIT_COLS]
+        if any(value is not None for value in row):
+            controllers.append(result.label)
+            z_values.append(row)
+    if not z_values:
+        return
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z_values,
+            x=[name for name, _ in APPROACH_WAIT_COLS],
+            y=controllers,
+            colorscale=[[0.0, "#06111d"], [0.45, "#2f80ff"], [0.72, "#9b5cff"], [1.0, "#ff9f1c"]],
+            colorbar=dict(title="seconds"),
+            hovertemplate="<b>%{y}</b><br>%{x}: %{z:.2f}s average wait<extra></extra>",
+        )
+    )
+    apply_plot_theme(fig, height=312, showlegend=False)
+    fig.update_layout(
+        title=dict(text="Approach-Level Delay Heatmap", font=dict(size=14, color="#f0f7ff", family="Space Mono"), x=0),
+        xaxis_title="Approach",
+        yaxis_title="Controller",
+    )
+    st.plotly_chart(fig, width="stretch")
+    chart_caption("Warmer cells identify approaches where queues are more likely to accumulate.")
+
+
+def render_rl_insights(metrics: dict[str, dict[str, object]], qtable_info: dict[str, object]) -> None:
+    section_title("AI / RL Analytics", "policy memory, control activity, and learning signals")
+    rl = metrics.get("RL")
+    fixed = metrics.get("Fixed")
+    smart = metrics.get("Smart")
+    if not rl:
+        st.info("RL result data is not loaded. The section will populate when data/results_rl.csv is available.")
+        return
+
+    entries = qtable_info.get("entries")
+    reward = rl.get("reward_total")
+    epsilon = rl.get("epsilon")
+    phase_changes = rl.get("phase_changes")
+    improvement = pct_lower(as_float(rl.get("avg_wait")), as_float(fixed.get("avg_wait")) if fixed else None)
+    improvement_text, improvement_color = format_delta(improvement, "lower")
+    improvement_value = f"{improvement:.1f}%" if improvement is not None else "—"
+
+    reward_text = fmt_value(reward, 1, compact=True)
+    epsilon_text = fmt_value(epsilon, 4)
+    if reward is None and epsilon is None:
+        signal_delta, signal_color = "Reward and epsilon were not exported", "#8fa0bd"
+    elif reward is None:
+        signal_delta, signal_color = "Reward missing · epsilon logged", "#8fa0bd"
+    elif epsilon is None:
+        signal_delta, signal_color = "Reward logged · epsilon missing", "#8fa0bd"
+    else:
+        signal_delta, signal_color = "Both learning signals logged", "#22f3b6"
+
+    if improvement is not None and improvement >= 0:
+        story_title = "RL is reducing delay against the fixed baseline"
+        story_body = f"The learned policy records {improvement_text}. Use phase changes and Q-table size to judge whether that gain comes with stable behavior."
+    elif improvement is not None:
+        story_title = "RL needs another look on this run"
+        story_body = f"The current RL result is {improvement_text}. Reward, epsilon, and phase-change signals remain visible for tuning."
+    else:
+        story_title = "RL comparison is waiting for a fixed baseline"
+        story_body = "RL data loaded, but the fixed baseline is missing or incomplete, so improvement cannot be computed yet."
+    st.markdown(story_panel(story_title, story_body), unsafe_allow_html=True)
+
+    cols = st.columns(4)
+    cols[0].markdown(metric_card("Q-table entries", fmt_value(entries, 0, compact=True), "policy memory size", "Loaded from data/qtable.pkl" if entries is not None else "Q-table not available", "#22f3b6", "#22f3b6" if entries is not None else "#8fa0bd", "Policy"), unsafe_allow_html=True)
+    cols[1].markdown(metric_card("RL vs Fixed", improvement_value, "average wait reduction", improvement_text, "#00d4ff", improvement_color, "Delta"), unsafe_allow_html=True)
+    cols[2].markdown(metric_card("Phase changes", fmt_value(phase_changes, 0), "signal timing activity", "Computed from phase transitions" if phase_changes is not None else "Not available in CSV", "#2f80ff", "#8fa0bd" if phase_changes is None else "#2f80ff", "Control"), unsafe_allow_html=True)
+    cols[3].markdown(metric_card("Reward / epsilon", f"{reward_text} / {epsilon_text}", "training signal coverage", signal_delta, "#9b5cff", signal_color, "Logs"), unsafe_allow_html=True)
+
+    smart_note = "Rule-based stability baseline"
+    if smart and smart.get("phase_changes") is not None:
+        smart_note = f"{fmt_value(smart.get('phase_changes'), 0)} phase changes detected"
+    cards = st.columns(3)
+    cards[0].markdown(insight_card("Delay story", improvement_text, "The primary RL question is whether the learned policy lowers average waiting time versus fixed timing.", "#22f3b6"), unsafe_allow_html=True)
+    cards[1].markdown(insight_card("Signal coverage", "Logged" if reward is not None or epsilon is not None else "Missing", signal_delta, "#00d4ff"), unsafe_allow_html=True)
+    cards[2].markdown(insight_card("Controller activity", fmt_value(phase_changes, 0), f"RL phase activity is compared with Smart control context: {smart_note}.", "#2f80ff"), unsafe_allow_html=True)
+
+
+def render_insight_cards(results: dict[str, ResultSet], metrics: dict[str, dict[str, object]]) -> None:
+    if not metrics:
+        return
+    section_title("Key Insights", "presentation-ready takeaways")
+    best = best_by_metric(metrics, "avg_wait")
+    vision_result = results.get("vision")
+    fixed = metrics.get("Fixed")
+    insight_items: list[tuple[str, str, str, str]] = []
+    if best:
+        label, metric = best
+        insight_items.append(("Lowest delay", label, f"{label} currently leads the scenario with {fmt_value(metric.get('avg_wait'), 2)} {metric.get('avg_wait_unit', 's')} average delay.", str(metric.get("color"))))
+    if vision_result and vision_result.found:
+        reasons = get_series(vision_result, REASON_ALIASES)
+        emergency_reasons = [reason for reason in reasons if isinstance(reason, str) and ("camera" in reason.lower() or "emg" in reason.lower() or "emergency" in reason.lower())]
+        if emergency_reasons:
+            insight_items.append(("Camera intelligence", f"{len(emergency_reasons):,} steps", f"Vision mode logged {len(emergency_reasons):,} camera or emergency-aware control steps.", "#9b5cff"))
+        else:
+            insight_items.append(("Camera intelligence", "Vision loaded", "Vision mode is available for camera-aware emergency behavior comparison.", "#9b5cff"))
+    if fixed:
+        best_label = best[0] if best else "adaptive control"
+        body = "Fixed timing is a useful baseline, but adaptive controllers respond to changing demand."
+        if best_label != "Fixed":
+            body = f"Fixed timing anchors the comparison, while {best_label} adapts better to the loaded scenario."
+        insight_items.append(("Baseline behavior", f"{fmt_value(fixed.get('avg_wait'), 2)} {fixed.get('avg_wait_unit', 's')}", body, "#ff9f1c"))
+    for col, item in zip(st.columns(3), insight_items[:3]):
+        label, stat, body, accent = item
+        col.markdown(insight_card(label, stat, body, accent), unsafe_allow_html=True)
+
+
+def render_data_status(results: dict[str, ResultSet]) -> None:
+    section_title("Data Quality / File Status", "source freshness and schema checks")
+    status_cols = st.columns(len(results) or 1)
+    for col, result in zip(status_cols, results.values()):
+        col.markdown(status_card(result), unsafe_allow_html=True)
+    with st.expander("Column coverage and file diagnostics", expanded=False):
+        rows = []
+        for result in results.values():
+            if result.error:
+                status = "Error"
+            elif result.found and result.row_count:
+                status = "Loaded"
+            elif result.path.exists():
+                status = "Empty"
+            else:
+                status = "Missing"
+            rows.append(
+                {
+                    "Controller": result.label,
+                    "File": result.path.name,
+                    "Status": status,
+                    "Rows": result.row_count,
+                    "Columns": result.column_count,
+                    "Modified": result.modified or "—",
+                    "Issue": result.error or "",
+                }
+            )
+        st.dataframe(rows, width="stretch", hide_index=True)
+        missing = [name for name in EXPECTED_FILES if not (DATA_DIR / name).exists()]
+        if missing:
+            st.warning("Missing result files: " + ", ".join(missing))
+        for result in results.values():
+            if result.original_columns:
+                st.markdown(
+                    f"**{escape_text(result.label)} columns:** "
+                    + ", ".join(f"`{escape_text(col)}`" for col in result.original_columns)
+                )
+
+
+def render_footer() -> None:
+    st.markdown(
+        """
+        <div style="margin-top: 34px; padding-top: 18px; border-top: 1px solid rgba(148,163,184,0.10);
+                    color:#53637f; font-size:0.76rem; text-align:center;">
+            AI Traffic Brain · Intelligent Adaptive Traffic Light Control · INPT
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 # ---------------------------------------------------------------------------
-# ── SECTION 8 — Emergency vehicle activity
+# App entry point
 # ---------------------------------------------------------------------------
-st.html('<div class="sec">Emergency Vehicle Activity</div>')
 
-emg_left, emg_right = st.columns([3, 2])
+def main() -> None:
+    set_page_config()
+    inject_global_css()
 
-with emg_left:
-    fig_emg = go.Figure()
-    datasets = [(fixed, "Fixed", C_FIXED), (smart, "Smart", C_SMART)]
-    if vision_avail:
-        datasets.append((vision, "Vision", C_VISION))
-    if rl_avail:
-        datasets.append((rl, "RL", C_RL))
+    results = load_results()
+    metrics = compute_metrics(results)
+    qtable_info = load_qtable_info()
 
-    for d, name, color in datasets:
-        t_all   = col(d, "sim_time")
-        emg_all = col(d, "emergency_count")
-        t_emg   = [t for t, v in zip(t_all, emg_all) if isinstance(v, (int,float)) and v > 0]
-        v_emg   = [v for v in emg_all if isinstance(v, (int,float)) and v > 0]
-        fig_emg.add_trace(go.Scatter(
-            x=t_emg, y=v_emg,
-            mode="markers",
-            name=name,
-            marker=dict(color=color, size=10, symbol="diamond",
-                        line=dict(color=C_WARN, width=1.5)),
-            hovertemplate="t=%{x:.0f}s  |  %{y:.0f} lane(s)<extra>" + name + "</extra>",
-        ))
-    fig_emg.update_layout(**{
-        **PLOTLY_BASE,
-        "height": 260,
-        "xaxis_title": "Simulation time (s)",
-        "yaxis_title": "Lanes with emergency vehicle",
-        "yaxis": {**PLOTLY_BASE["yaxis"], "dtick": 1},
-        "legend": LEGEND_H,
-    })
-    st.plotly_chart(fig_emg, use_container_width=True)
+    focus = render_sidebar(results, metrics)
+    render_header(metrics)
+    render_kpi_cards(metrics)
+    render_controller_comparison(metrics)
+    render_waiting_time_chart(metrics, focus_controller=focus)
+    render_intersection_breakdown(results, metrics)
+    render_rl_insights(metrics, qtable_info)
+    render_insight_cards(results, metrics)
+    render_data_status(results)
+    render_footer()
 
-with emg_right:
-    def _first(times, vals):
-        return next((int(t) for t, v in zip(times, vals)
-                     if isinstance(v, (int,float)) and v > 0), None)
-    def _last(times, vals):
-        return next((int(t) for t, v in zip(reversed(list(times)),
-                                             reversed(list(vals)))
-                     if isinstance(v, (int,float)) and v > 0), None)
 
-    emg_f = col(fixed, "emergency_count")
-    emg_s = col(smart, "emergency_count")
-    t_f2  = col(fixed, "sim_time")
-    t_s2  = col(smart, "sim_time")
-
-    emg_r = col(rl, "emergency_count") if rl_avail else []
-    t_r2  = col(rl, "sim_time")        if rl_avail else []
-
-    rows_emg = [
-        ("Total emergency steps",
-         str(emg_steps_f), str(emg_steps_s),
-         str(emg_steps_v) if vision_avail else "—",
-         str(emg_steps_r) if rl_avail else "—"),
-        ("Peak simultaneous lanes",
-         str(int(safe_max(emg_f))), str(int(safe_max(emg_s))),
-         str(int(safe_max(col(vision, "emergency_count")))) if vision_avail else "—",
-         str(int(safe_max(emg_r))) if rl_avail else "—"),
-        ("First emergency at (s)",
-         str(_first(t_f2, emg_f) or "—"), str(_first(t_s2, emg_s) or "—"),
-         str(_first(col(vision,"sim_time"), col(vision,"emergency_count")) or "—")
-         if vision_avail else "—",
-         str(_first(t_r2, emg_r) or "—") if rl_avail else "—"),
-        ("Last emergency at (s)",
-         str(_last(t_f2, emg_f) or "—"), str(_last(t_s2, emg_s) or "—"),
-         str(_last(col(vision,"sim_time"), col(vision,"emergency_count")) or "—")
-         if vision_avail else "—",
-         str(_last(t_r2, emg_r) or "—") if rl_avail else "—"),
-    ]
-
-    head_vision = f'<th><span class="badge bv">Vision</span></th>' if vision_avail else ""
-    head_rl     = f'<th><span class="badge" style="background:{C_RL}22;color:{C_RL};border:1px solid {C_RL}44;">RL</span></th>' if rl_avail else ""
-    html = f"""<table class="emg-tbl">
-      <thead><tr>
-        <th>Metric</th>
-        <th><span class="badge bf">Fixed</span></th>
-        <th><span class="badge bs">Smart</span></th>
-        {head_vision}
-        {head_rl}
-      </tr></thead><tbody>"""
-    for row in rows_emg:
-        metric = row[0]
-        fv, sv = row[1], row[2]
-        vv     = row[3] if vision_avail else None
-        rv     = row[4] if rl_avail else None
-        vis_td = f"<td style='color:{C_VISION};font-weight:700;font-family:\"Space Mono\",monospace;'>{vv}</td>" if vv is not None else ""
-        rl_td  = f"<td style='color:{C_RL};font-weight:700;font-family:\"Space Mono\",monospace;'>{rv}</td>"    if rv is not None else ""
-        html += (f"<tr><td style='color:#6b7a9e;'>{metric}</td>"
-                 f"<td style='color:{C_FIXED};font-weight:700;font-family:\"Space Mono\",monospace;'>{fv}</td>"
-                 f"<td style='color:{C_SMART};font-weight:700;font-family:\"Space Mono\",monospace;'>{sv}</td>"
-                 f"{vis_td}{rl_td}</tr>")
-    html += "</tbody></table>"
-    st.html(html)
-
-# ---------------------------------------------------------------------------
-# ── FOOTER
-# ---------------------------------------------------------------------------
-csvs_note = (
-    "<code style='color:#2a3a5a;font-family:\"Space Mono\",monospace;'>results_fixed.csv</code>, "
-    "<code style='color:#2a3a5a;font-family:\"Space Mono\",monospace;'>results_smart.csv</code>"
-    + (", <code style='color:#2a3a5a;font-family:\"Space Mono\",monospace;'>results_vision.csv</code>"
-       if vision_avail else "")
-    + (", <code style='color:#2a3a5a;font-family:\"Space Mono\",monospace;'>results_rl.csv</code>"
-       if rl_avail else "")
-)
-st.html(f"""
-<div class="footer">
-  <div style="font-family:'Space Mono',monospace;font-size:0.9rem;font-weight:700;
-              color:#1e2a3a;letter-spacing:0.14em;margin-bottom:8px;">
-    INPT &nbsp;·&nbsp; INSTITUT NATIONAL DES POSTES ET TÉLÉCOMMUNICATIONS
-  </div>
-  <div style="margin-bottom:5px;font-family:'Inter',sans-serif;color:#1a2438;">
-    <strong style="color:#2a3a5a;">AI Traffic Brain</strong> &nbsp;—&nbsp;
-    Intelligent Adaptive Traffic Light Control Using AI
-  </div>
-  <div style="font-family:'Inter',sans-serif;color:#1a2438;">
-    ACHAAR Mohammed Amine &nbsp;&amp;&nbsp; ZAKANE Mohamed &nbsp;·&nbsp;
-    Supervised by Dr. EN-NOUAARY ABDESLAM
-  </div>
-  <div style="margin-top:10px;font-size:0.68rem;color:#111826;font-family:'Space Mono',monospace;">
-    DATA: {csvs_note}
-    &nbsp;·&nbsp; SUMO 1.26 &nbsp;·&nbsp; 2025–2026
-  </div>
-</div>
-""")
+if __name__ == "__main__":
+    main()
