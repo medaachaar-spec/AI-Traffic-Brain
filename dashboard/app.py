@@ -367,7 +367,7 @@ def inject_global_css() -> None:
                 linear-gradient(120deg, rgba(0, 212, 255, 0.10), rgba(155, 92, 255, 0.07) 42%, rgba(34, 243, 182, 0.04)),
                 rgba(9, 14, 27, 0.76);
             box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
-            overflow: hidden;
+            overflow: visible;
         }
         .hero-title {
             margin: 0;
@@ -423,7 +423,9 @@ def inject_global_css() -> None:
             box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 48px rgba(0,0,0,0.28);
         }
         .verdict-card {
-            padding: 18px;
+            min-width: 0;
+            margin: 2px 2px 2px 0;
+            padding: 20px;
             border-color: rgba(34, 243, 182, 0.32);
             background:
                 linear-gradient(145deg, rgba(34, 243, 182, 0.13), rgba(47, 128, 255, 0.06)),
@@ -953,8 +955,8 @@ def compute_metrics(results: dict[str, ResultSet]) -> dict[str, dict[str, object
         time_series = get_series(result, TIME_ALIASES) or list(range(1, result.row_count + 1))
         total_wait = get_series(result, TOTAL_WAIT_ALIASES, fuzzy=True)
         avg_wait = get_series(result, AVG_WAIT_ALIASES, fuzzy=True)
-        wait_basis = "avg_waiting_time" if avg_wait else "total_waiting_time"
-        avg_wait_value = safe_mean(avg_wait) if avg_wait else safe_mean(total_wait)
+        wait_basis = "total_waiting_time" if total_wait else "avg_waiting_time"
+        avg_wait_value = safe_mean(total_wait) if total_wait else safe_mean(avg_wait)
         total_wait_average = safe_mean(total_wait)
 
         total_queue_logged = get_series(result, TOTAL_QUEUE_ALIASES)
@@ -1291,7 +1293,7 @@ def render_kpi_cards(metrics: dict[str, dict[str, object]]) -> None:
         label, metric = best_wait
         delta, color = format_delta(pct_lower(as_float(metric.get("avg_wait")), as_float(fixed.get("avg_wait")) if fixed else None), "lower")
         cols[0].markdown(
-            metric_card("Best delay", fmt_value(metric.get("avg_wait"), 2), f"{label} · lowest {metric.get('avg_wait_unit', 's')}", delta, str(metric["color"]), color, "Best"),
+            metric_card("Lowest avg wait", fmt_value(metric.get("avg_wait"), 2), f"{label} controller", delta, str(metric["color"]), color, "Best"),
             unsafe_allow_html=True,
         )
     if worst_wait:
@@ -1300,7 +1302,7 @@ def render_kpi_cards(metrics: dict[str, dict[str, object]]) -> None:
         gap = pct_higher(as_float(metric.get("avg_wait")), best_value)
         delta, color = ("No spread detected", "#8fa0bd") if gap is None or label == (best_wait[0] if best_wait else "") else (f"{gap:.1f}% higher than best", "#ff9f1c")
         cols[1].markdown(
-            metric_card("Highest delay", fmt_value(metric.get("avg_wait"), 2), f"{label} · watch {metric.get('avg_wait_unit', 's')}", delta, str(metric["color"]), color, "Watch"),
+            metric_card("Highest avg wait", fmt_value(metric.get("avg_wait"), 2), f"{label} controller", delta, str(metric["color"]), color, "Watch"),
             unsafe_allow_html=True,
         )
     if best_queue:
@@ -1311,7 +1313,7 @@ def render_kpi_cards(metrics: dict[str, dict[str, object]]) -> None:
         label, metric = best_throughput
         delta, color = format_delta(pct_higher(as_float(metric.get("throughput")), as_float(fixed.get("throughput")) if fixed else None), "higher")
         cols[3].markdown(
-            metric_card("Flow leader", fmt_value(metric.get("throughput"), 0), f"{label} · {metric.get('throughput_source', 'vehicles')}", delta, str(metric["color"]), color, "Best"),
+            metric_card("Flow leader", fmt_value(metric.get("throughput"), 0), f"{label} · max active vehicles", delta, str(metric["color"]), color, "Best"),
             unsafe_allow_html=True,
         )
 
@@ -1340,7 +1342,7 @@ def render_controller_comparison(metrics: dict[str, dict[str, object]]) -> None:
         )
         apply_plot_theme(fig, height=344, showlegend=False)
         fig.update_layout(
-            title=dict(text="Average Delay by Controller", font=dict(size=15, color="#f0f7ff", family="Space Mono"), x=0),
+            title=dict(text="Average Waiting Time by Controller", font=dict(size=15, color="#f0f7ff", family="Space Mono"), x=0),
             yaxis_title="Average waiting time",
             xaxis_title="Controller",
             bargap=0.42,

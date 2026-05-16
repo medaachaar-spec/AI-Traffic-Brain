@@ -1,50 +1,34 @@
-# ── Simulation output ─────────────────────────────────────────────────────────
-data/*.csv
-data/*.pkl
-data/*.bak
-data/*.tmp
+# Simulation outputs
 data/*.xml
+data/*.bak
 
-# ── Python ────────────────────────────────────────────────────────────────────
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 *.egg-info/
 dist/
 build/
 
-# ── Streamlit ─────────────────────────────────────────────────────────────────
+# Streamlit
 .streamlit/
 
-# ── Virtual environments ───────────────────────────────────────────────────────
-venv/
+# Virtual environments
 .venv/
+venv/
 env/
 
-# ── Environment / secrets ─────────────────────────────────────────────────────
+# Environment / secrets
 .env
 .env.*
 
-# ── OS artefacts ──────────────────────────────────────────────────────────────
+# OS artifacts
 .DS_Store
 Thumbs.db
-# Ignore heavy / useless files
+
+# Local tooling / runtimes
 oracleJdk-26/
-data/
-__pycache__/
-.claude/
-
-# Python
-*.pyc
-
-# RL files
-*.pkl
-*.csv
-*.bak
-*.tmp
 .agents/
+.claude/
 skills-lock.json
-0.05
-0.66
-python
